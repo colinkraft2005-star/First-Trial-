@@ -399,13 +399,14 @@ with tab_depth:
 
                 # OPEN slot rendering
                 if is_open:
-                    st.markdown(f"""
-                        <div style='border:2px dashed #FFD100; border-radius:8px; padding:14px 10px;
-                                    margin-bottom:10px; background-color:rgba(255,209,0,0.06); text-align:center;'>
-                            <div style='font-size:13px; font-weight:bold; color:#FFD100;'>OPEN</div>
-                            <div style='font-size:10px; color:#FFD100; opacity:0.85; margin-top:2px;'>{descriptor}</div>
-                        </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style=\"border:2px dashed #FFD100;border-radius:8px;padding:14px 10px;"
+                        "margin-bottom:10px;background-color:rgba(255,209,0,0.06);text-align:center;\">"
+                        "<div style=\"font-size:13px;font-weight:bold;color:#FFD100;\">OPEN</div>"
+                        "<div style=\"font-size:10px;color:#FFD100;opacity:0.85;margin-top:2px;\">" + descriptor + "</div>"
+                        "</div>",
+                        unsafe_allow_html=True
+                    )
                     continue
 
                 # Pull live stats if this player links to BartTorvik
@@ -417,26 +418,32 @@ with tab_depth:
                         stat_line = f"BPM {s['BPM']:.1f} · USG {s['USG']:.0f}% · eFG {s['EFG']:.0f}%"
 
                 border = "#FFD100" if is_starter else "#CBD5E1"
-                starter_badge = ("<span style='font-size:8px; background:#FFD100; color:#0F172A; "
-                                 "font-weight:bold; padding:1px 5px; border-radius:3px;'>STARTER</span>") if is_starter else ""
+                starter_badge = (
+                    "<span style=\"font-size:8px;background:#FFD100;color:#0F172A;"
+                    "font-weight:bold;padding:1px 5px;border-radius:3px;\">STARTER</span>"
+                ) if is_starter else ""
 
-                stat_html = (f"<div style='font-size:9.5px; color:#2774AE; font-weight:600; margin-top:3px;'>{stat_line}</div>"
-                             if stat_line else "")
-                desc_html = (f"<div style='font-size:9.5px; color:#64748B; margin-top:2px;'>{descriptor}</div>"
-                             if descriptor else "")
+                stat_html = (
+                    "<div style=\"font-size:9.5px;color:#2774AE;font-weight:600;margin-top:3px;\">" + stat_line + "</div>"
+                    if stat_line else ""
+                )
+                desc_html = (
+                    "<div style=\"font-size:9.5px;color:#64748B;margin-top:2px;\">" + descriptor + "</div>"
+                    if descriptor else ""
+                )
 
-                st.markdown(f"""
-                    <div style='border:1px solid {border}; border-left:4px solid {border}; border-radius:6px;
-                                padding:9px 10px; margin-bottom:10px; background-color:#FFFFFF;
-                                box-shadow:1px 1px 3px rgba(0,0,0,0.05);'>
-                        <div style='display:flex; justify-content:space-between; align-items:center;'>
-                            <span style='font-size:12.5px; font-weight:bold; color:#0F172A;'>{pname}</span>
-                            {starter_badge}
-                        </div>
-                        {stat_html}
-                        {desc_html}
-                    </div>
-                """, unsafe_allow_html=True)
+                card_html = (
+                    "<div style=\"border:1px solid " + border + ";border-left:4px solid " + border + ";border-radius:6px;"
+                    "padding:9px 10px;margin-bottom:10px;background-color:#FFFFFF;"
+                    "box-shadow:1px 1px 3px rgba(0,0,0,0.05);\">"
+                    "<div style=\"display:flex;justify-content:space-between;align-items:center;\">"
+                    "<span style=\"font-size:12.5px;font-weight:bold;color:#0F172A;\">" + pname + "</span>"
+                    + starter_badge +
+                    "</div>"
+                    + stat_html + desc_html +
+                    "</div>"
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
 
                 # Jump-to-profile button (only for stat-linked players)
                 if bt_name and not df_all[df_all["PLAYER"] == bt_name].empty:
@@ -796,12 +803,12 @@ with tab4:
 
         for i, pos_group in enumerate(pos_columns):
             with st_cols[i]:
-                st.markdown(f"""
-                    <div style='background-color:#1E3A8A; color:white; font-weight:bold;
-                                text-align:center; padding:6px; border-radius:4px; margin-bottom:12px;'>
-                        {pos_group}
-                    </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    "<div style=\"background-color:#1E3A8A;color:white;font-weight:bold;"
+                    "text-align:center;padding:6px;border-radius:4px;margin-bottom:12px;\">"
+                    + pos_group + "</div>",
+                    unsafe_allow_html=True
+                )
 
                 group_players = board_data[board_data["position"] == pos_group]
 
@@ -821,32 +828,31 @@ with tab4:
 
                         photo = player["photo_url"] if player["photo_url"] else "https://via.placeholder.com/150"
                         role_label = player["role"] if player["role"] else "Unassigned Role"
+                        team_name = player["team_name"]
 
-                        st.markdown(f"""
-                            <div style='border:1px solid #CBD5E1; border-radius:6px; padding:10px;
-                                        margin-bottom:12px; background-color:#FFFFFF; box-shadow: 1px 1px 3px rgba(0,0,0,0.05);'>
-                                <table style='width:100%; border-collapse:collapse; margin-bottom:4px;'>
-                                    <tr>
-                                        <td style='width:95px; vertical-align:top;'>
-                                            <div style='width:90px; height:90px; display:flex; align-items:center; justify-content:center; border-radius:4px; border:1px solid #E2E8F0; background-color:#F8FAFC; overflow:hidden;'>
-                                                <img src='{photo}' onerror="this.onerror=null; this.src='https://upload.wikimedia.org/wikipedia/commons/8/89/Portrait_Placeholder.png';" style='max-width:100%; max-height:100%; object-fit:contain;'/>
-                                            </div>
-                                        </td>
-                                        <td style='padding-left:12px; vertical-align:top; line-height:1.3;'>
-                                            <div style='font-size:14px; font-weight:bold; color:#0F172A;'>{p_name}</div>
-                                            <div style='font-size:11px; color:#475569; font-weight:600;'>{player['team_name']}</div>
-                                            <div style='font-size:11px; color:#64748B;'>{meta_line}</div>
-                                        </td>
-                                    </tr>
-                                </table>
-                                <div style='border-top:1px dashed #E2E8F0; padding-top:4px; font-size:10px; font-weight:600; color:#1E40AF;'>
-                                    🎯 {role_label}
-                                </div>
-                                <div style='font-size:9.5px; font-weight:bold; color:#475569; margin-top:2px;'>
-                                    📊 {stat_line}
-                                </div>
-                            </div>
-                        """, unsafe_allow_html=True)
+                        st.markdown(
+                            "<div style=\"border:1px solid #CBD5E1;border-radius:6px;padding:10px;"
+                            "margin-bottom:12px;background-color:#FFFFFF;box-shadow:1px 1px 3px rgba(0,0,0,0.05);\">"
+                            "<table style=\"width:100%;border-collapse:collapse;margin-bottom:4px;\">"
+                            "<tr>"
+                            "<td style=\"width:95px;vertical-align:top;\">"
+                            "<div style=\"width:90px;height:90px;display:flex;align-items:center;justify-content:center;"
+                            "border-radius:4px;border:1px solid #E2E8F0;background-color:#F8FAFC;overflow:hidden;\">"
+                            "<img src=\"" + photo + "\" onerror=\"this.onerror=null;this.src='https://upload.wikimedia.org/wikipedia/commons/8/89/Portrait_Placeholder.png';\" "
+                            "style=\"max-width:100%;max-height:100%;object-fit:contain;\"/>"
+                            "</div></td>"
+                            "<td style=\"padding-left:12px;vertical-align:top;line-height:1.3;\">"
+                            "<div style=\"font-size:14px;font-weight:bold;color:#0F172A;\">" + p_name + "</div>"
+                            "<div style=\"font-size:11px;color:#475569;font-weight:600;\">" + team_name + "</div>"
+                            "<div style=\"font-size:11px;color:#64748B;\">" + meta_line + "</div>"
+                            "</td></tr></table>"
+                            "<div style=\"border-top:1px dashed #E2E8F0;padding-top:4px;font-size:10px;font-weight:600;color:#1E40AF;\">"
+                            "🎯 " + role_label + "</div>"
+                            "<div style=\"font-size:9.5px;font-weight:bold;color:#475569;margin-top:2px;\">"
+                            "📊 " + stat_line + "</div>"
+                            "</div>",
+                            unsafe_allow_html=True
+                        )
 
 # ==========================================
 # TAB 5: PLAYER CARD / RANKING SYSTEM
@@ -1005,7 +1011,7 @@ def score_comp(player, hist_row):
     try:
         p_h = parse_height_inches(player.get("height", "6'6\""))
         h_h = parse_height_inches(str(hist_row.get("HEIGHT", "6'6\"")))
-        if abs(p_h - h_h) > 3:
+        if abs(p_h - h_h) > 5:
             return 0.0
 
         def nd(a, b, r):
@@ -1038,7 +1044,7 @@ def score_comp(player, hist_row):
         playmaking = float(player.get("playmaking", 60))
         rebounding = float(player.get("rebounding", 60))
 
-        # Map card ratings to stat dimensions
+        # Map card ratings to stat dimensions (wider ranges = less harsh)
         p_ts_mapped  = 45 + (shooting / 100) * 25
         p_efg_mapped = 40 + (shooting / 100) * 20
         p_dbpm_mapped = (defense - 50) / 10
@@ -1048,20 +1054,20 @@ def score_comp(player, hist_row):
         p_blk_mapped  = (defense / 100) * 8
         p_stl_mapped  = (defense / 100) * 3.5
 
-        # Fingerprint scores
+        # Fingerprint scores with wider radii
         scores = {
-            "ts":   nd(p_ts_mapped, h_ts, 8),
-            "efg":  nd(p_efg_mapped, h_efg, 8),
-            "usg":  nd(p_usg, h_usg, 6),
-            "p3":   nd(p_p3, h_p3, 12),
-            "ast":  nd(p_ast_mapped, h_ast, 7),
-            "orb":  nd(p_orb_mapped, h_orb, 4),
-            "drb":  nd(p_drb_mapped, h_drb, 6),
-            "blk":  nd(p_blk_mapped, h_blk, 3),
-            "stl":  nd(p_stl_mapped, h_stl, 1.5),
-            "dbpm": nd(p_dbpm_mapped, h_dbpm, 2),
-            "bpm":  nd(h_bpm, 0, 5),
-            "ht":   nd(p_h, h_h, 2),
+            "ts":   nd(p_ts_mapped, h_ts, 12),
+            "efg":  nd(p_efg_mapped, h_efg, 12),
+            "usg":  nd(p_usg, h_usg, 10),
+            "p3":   nd(p_p3, h_p3, 15),
+            "ast":  nd(p_ast_mapped, h_ast, 10),
+            "orb":  nd(p_orb_mapped, h_orb, 6),
+            "drb":  nd(p_drb_mapped, h_drb, 8),
+            "blk":  nd(p_blk_mapped, h_blk, 5),
+            "stl":  nd(p_stl_mapped, h_stl, 3),
+            "dbpm": nd(p_dbpm_mapped, h_dbpm, 4),
+            "bpm":  nd(h_bpm, 0, 8),
+            "ht":   nd(p_h, h_h, 4),
         }
 
         # Base weights
