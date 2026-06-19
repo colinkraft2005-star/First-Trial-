@@ -920,8 +920,8 @@ def fetch_torvik_year(year):
                 "team": str(row[1]),
                 "conf": str(row[2]),
                 "year": year,
-                "cls": str(row[22]) if len(row) > 22 else "",
-                "height": str(row[23]) if len(row) > 23 else "",
+                "cls": str(row[25]) if len(row) > 25 else "",
+                "height": "",
                 "ts": sf(8),
                 "usg": sf(6),
                 "p3": sf(21) * 100,
@@ -996,17 +996,25 @@ def score_historical_comp(player, hist):
     # --- FOUNDATION: always fixed ---
     player_h = height_inches(player.get("height", "6'6\""))
     hist_h = height_inches(hist.get("height", "6'6\""))
-    height_score = nd2(player_h, hist_h, 3)
+    # only use height score if both have valid heights
+    height_score = nd2(player_h, hist_h, 3) if hist_h != 76 else 0.5
+
+    # infer hist position from stats: guards have high AST, bigs have high BLK+ORB
+    hist_ast = hist["ast"]
+    hist_blk = hist["blk"]
+    hist_orb = hist["orb"]
+    if hist_ast > 22:
+        hist_pos = 0  # guard/playmaker
+    elif hist_ast > 14:
+        hist_pos = 1  # combo guard
+    elif hist_blk < 3 and hist_orb < 5:
+        hist_pos = 2  # wing
+    elif hist_blk > 5 or hist_orb > 8:
+        hist_pos = 4  # big
+    else:
+        hist_pos = 3  # forward
 
     player_pos = pos_group(player.get("pos", "wing"))
-    if hist_h <= 74:
-        hist_pos = 0 if hist["ast"] > 25 else 1
-    elif hist_h <= 77:
-        hist_pos = 2
-    elif hist_h <= 80:
-        hist_pos = 3
-    else:
-        hist_pos = 4
     pos_score = nd2(player_pos, hist_pos, 1.5)
 
     # --- CORE METRICS ---
