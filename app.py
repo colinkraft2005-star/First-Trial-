@@ -917,40 +917,23 @@ def fetch_torvik_year(year):
                     return float(v) if v not in (None, "") else 0.0
                 except:
                     return 0.0
-
-            # row[22] = class (Fr/So/Jr/Sr), row[23] = height string like "6-10" or inches-only
-            raw_ht = str(row[23]) if len(row) > 23 else ""
-            # BartTorvik returns height as total inches (e.g. 82 for 6'10")
-            # but sometimes as "6-10" string - handle both
-            height_in = 78  # default 6'6"
-            height_str = ""
+            # row[23] confirmed as height per scraper.py
+            # BartTorvik stores height as total inches e.g. 82 = 6'10"
             try:
-                if "-" in raw_ht:
-                    parts = raw_ht.split("-")
-                    height_in = int(parts[0]) * 12 + int(parts[1])
-                elif raw_ht.isdigit():
-                    val = int(raw_ht)
-                    # if val is small (< 12), it's just inches part — but we don't know feet
-                    # values 60-90 are total inches (5'0" to 7'6"), anything else is bad data
-                    if 60 <= val <= 96:
-                        height_in = val
-                    else:
-                        height_in = 78
-                feet = height_in // 12
-                inches = height_in % 12
-                height_str = f"{feet}'{inches}\""
+                total_in = int(float(str(row[23])))
+                if not (60 <= total_in <= 96):
+                    total_in = 78
+                height_str = f"{total_in // 12}'{total_in % 12}\""
             except:
-                height_str = raw_ht
-                height_in = 78
-
+                total_in = 78
+                height_str = "6'6\""
             results.append({
                 "name": str(row[0]),
                 "team": str(row[1]),
                 "conf": str(row[2]),
                 "year": year,
-                "cls": str(row[22]) if len(row) > 22 else "",
+                "height_in": total_in,
                 "height": height_str,
-                "height_in": height_in,
                 "ts": sf(8),
                 "usg": sf(6),
                 "p3": sf(21) * 100,
@@ -984,20 +967,14 @@ def height_inches(h):
         h = str(h).replace('"', '').strip()
         if "'" in h:
             parts = h.split("'")
-            feet = int(parts[0].strip())
-            inches = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 0
-            return feet * 12 + inches
+            return int(parts[0]) * 12 + (int(parts[1]) if parts[1].strip() else 0)
         if "-" in h:
             parts = h.split("-")
-            feet = int(parts[0].strip())
-            inches = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 0
-            return feet * 12 + inches
+            return int(parts[0]) * 12 + (int(parts[1]) if parts[1].strip() else 0)
         val = int(h)
-        # if it's already in inches (e.g. 84), return as-is
-        # if it looks like feet (e.g. 6 or 7), multiply
         return val if val > 10 else val * 12
     except:
-        return 76
+        return 78
 
 
 def pos_group(pos):
@@ -1010,7 +987,7 @@ def pos_group(pos):
         return 2
     if any(x in p for x in ["pf", "forward", "f/"]):
         return 3
-    if any(x in p for x in ["c", "center", "/c"]):
+    if any(x in p for x in ["/c", "center"]) or p.strip() == "c":
         return 4
     return 2
 
@@ -1022,80 +999,69 @@ def score_historical_comp(player, hist):
         except:
             return 0.0
 
-    # --- FOUNDATION: always fixed ---
+    # === PILLAR 1: HEIGHT - hard cutoff 3 inches, 25% weight ===
     player_h = height_inches(player.get("height", "6'6\""))
     hist_h = hist.get("height_in", 78)
-    height_score = nd2(player_h, hist_h, 3)
+    if abs(player_h - hist_h) > 3:
+        return 0.0
+    height_score = nd2(player_h, hist_h, 2)
 
-    # infer hist position from height + stats
-    hist_ast = hist["ast"]
-    hist_blk = hist["blk"]
-    hist_orb = hist["orb"]
-    if hist_h <= 74:
-        hist_pos = 0 if hist_ast > 20 else 1
-    elif hist_h <= 77:
-        hist_pos = 1 if hist_ast > 18 else 2
-    elif hist_h <= 80:
-        hist_pos = 2 if hist_blk < 4 else 3
-    elif hist_h <= 83:
-        hist_pos = 3 if hist_orb < 8 else 4
-    else:
-        hist_pos = 4
-
+    # === PILLAR 2: ROLE/POSITION - hard cutoff 1 bucket, 25% weight ===
     player_pos = pos_group(player.get("pos", "wing"))
-    pos_score = nd2(player_pos, hist_pos, 1.5)
+    h_ast = hist["ast"]
+    h_blk = hist["blk"]
+    h_orb = hist["orb"]
+    if h_ast >= 20 and h_orb <= 6:
+        hist_pos = 0
+    elif h_ast >= 14 and h_blk <= 3:
+        hist_pos = 1
+    elif h_blk <= 4 and h_orb <= 7:
+        hist_pos = 2
+    elif h_blk >= 5 or h_orb >= 9:
+        hist_pos = 4
+    else:
+        hist_pos = 3
+    if abs(player_pos - hist_pos) > 1:
+        return 0.0
+    pos_score = nd2(player_pos, hist_pos, 1.0)
 
-    # --- CORE METRICS ---
-    usg_score  = nd2(float(player.get("usg", 18) or 18), hist["usg"], 8)
-    ts_score   = nd2(float(player.get("ts", 58) or 58), hist["ts"], 10)
-    p3_score   = nd2(float(player.get("p3", 30) or 0), hist["p3"], 12)
-    bpm_score  = nd2((float(player.get("shooting", 70)) - 50) / 10, hist["bpm"], 3)
-    def_score  = nd2((float(player.get("defense", 60)) - 50) / 10, hist["dbpm"], 2)
-    ast_score  = nd2(float(player.get("playmaking", 60)) / 3, hist["ast"], 8)
-    reb_score  = nd2(float(player.get("rebounding", 60)) / 10, hist["orb"] + hist["drb"], 4)
-    conf_score = nd2(conf_tier(player.get("school", "")), conf_tier(hist["conf"]), 2)
+    # === PILLAR 3: CONFERENCE - hard cutoff 1 tier, 20% weight ===
+    player_conf = conf_tier(player.get("school", ""))
+    hist_conf = conf_tier(hist["conf"])
+    if abs(player_conf - hist_conf) > 1:
+        return 0.0
+    conf_score = nd2(player_conf, hist_conf, 1.0)
 
-    # --- DYNAMIC PROFILE DETECTION ---
+    # === SECONDARY STATS - 30% total, dynamic by dominant skill ===
+    usg_score = nd2(float(player.get("usg", 18) or 18), hist["usg"], 8)
+    ts_score  = nd2(float(player.get("ts", 58) or 58), hist["ts"], 10)
+    p3_score  = nd2(float(player.get("p3", 0) or 0), hist["p3"], 12)
+    def_score = nd2((float(player.get("defense", 60)) - 50) / 10, hist["dbpm"], 2)
+    ast_score = nd2(float(player.get("playmaking", 60)) / 3, hist["ast"], 8)
+    reb_score = nd2(float(player.get("rebounding", 60)) / 10, hist["orb"] + hist["drb"], 4)
+
     shooting   = float(player.get("shooting", 60))
     defense    = float(player.get("defense", 60))
     playmaking = float(player.get("playmaking", 60))
     rebounding = float(player.get("rebounding", 60))
-    skills     = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
-    dominant   = max(skills, key=skills.get)
-    dom_val    = skills[dominant]
+    skills = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
+    dominant = max(skills, key=skills.get)
+    dom_val  = skills[dominant]
 
-    # only shift weights if there's a clear dominant skill (>=75)
     if dom_val >= 75:
         if dominant == "shooting":
-            # shooter: heavily weight TS%, 3P%, USG (role spacer vs creator)
-            w = dict(height=0.16, pos=0.14, usg=0.10, ts=0.18, p3=0.18, bpm=0.08, defense=0.06, ast=0.05, reb=0.03, conf=0.02)
+            sec = ts_score * 0.14 + p3_score * 0.10 + usg_score * 0.04 + def_score * 0.01 + ast_score * 0.01 + reb_score * 0.00
         elif dominant == "rebounding":
-            # rebounder: heavily weight reb rate, size, position
-            w = dict(height=0.22, pos=0.18, usg=0.10, ts=0.06, p3=0.02, bpm=0.08, defense=0.08, ast=0.04, reb=0.18, conf=0.04)
+            sec = reb_score * 0.14 + usg_score * 0.06 + ts_score * 0.04 + def_score * 0.04 + ast_score * 0.01 + p3_score * 0.01
         elif dominant == "defense":
-            # defender: weight DBPM, position versatility, size
-            w = dict(height=0.20, pos=0.18, usg=0.08, ts=0.06, p3=0.03, bpm=0.06, defense=0.20, ast=0.07, reb=0.08, conf=0.04)
-        elif dominant == "playmaking":
-            # playmaker: weight AST%, USG, BPM
-            w = dict(height=0.16, pos=0.16, usg=0.14, ts=0.08, p3=0.04, bpm=0.12, defense=0.05, ast=0.18, reb=0.04, conf=0.03)
+            sec = def_score * 0.14 + reb_score * 0.06 + usg_score * 0.04 + ts_score * 0.03 + ast_score * 0.02 + p3_score * 0.01
         else:
-            w = dict(height=0.20, pos=0.18, usg=0.14, ts=0.08, p3=0.05, bpm=0.10, defense=0.10, ast=0.08, reb=0.04, conf=0.03)
+            sec = ast_score * 0.12 + usg_score * 0.08 + ts_score * 0.04 + def_score * 0.03 + reb_score * 0.02 + p3_score * 0.01
     else:
-        # balanced player: use base weights
-        w = dict(height=0.20, pos=0.18, usg=0.14, ts=0.08, p3=0.05, bpm=0.10, defense=0.10, ast=0.08, reb=0.04, conf=0.03)
+        sec = usg_score * 0.08 + ts_score * 0.08 + p3_score * 0.05 + def_score * 0.05 + ast_score * 0.04 + reb_score * 0.00
 
-    return (
-        height_score * w["height"] +
-        pos_score    * w["pos"]    +
-        usg_score    * w["usg"]    +
-        ts_score     * w["ts"]     +
-        p3_score     * w["p3"]     +
-        bpm_score    * w["bpm"]    +
-        def_score    * w["defense"]+
-        ast_score    * w["ast"]    +
-        reb_score    * w["reb"]    +
-        conf_score   * w["conf"]
-    )
+    return height_score * 0.25 + pos_score * 0.25 + conf_score * 0.20 + sec
+
 
 
 def skill_bar_html(label, value):
@@ -1212,8 +1178,7 @@ with tab5:
     st.subheader("Player Card / Ranking System")
     st.caption("HoopsHub Scout grade cards and historical transition comps.")
 
-    card_mode = st.radio("View:", ["Transfer Portal", "UCLA Roster"], horizontal=True)
-    players_to_show = PORTAL_PLAYERS if card_mode == "Transfer Portal" else UCLA_ROSTER_CARDS
+    players_to_show = PORTAL_PLAYERS
 
     tier_options = sorted(list(set(p["tier"] for p in players_to_show)))
     tier_filter = st.multiselect("Filter by Tier:", tier_options, default=tier_options)
@@ -1242,7 +1207,7 @@ with tab5:
             st.markdown(player_card_html(p, show_writeup=show_writeups), unsafe_allow_html=True)
 
             # Comp finder expander
-            if p.get("ts") and card_mode == "Transfer Portal":
+            if p.get("ts"):
                 with st.expander(f"Find Historical Comps: {p['name']}"):
                     st.caption("Pulling from BartTorvik historical database (2018-2024)...")
                     all_hist = []
@@ -1254,13 +1219,12 @@ with tab5:
                     if not all_hist:
                         st.warning("Could not load historical data from BartTorvik.")
                     else:
-                        # filter to players with meaningful minutes, and within 2 conf tiers
                         player_conf_tier = conf_tier(p.get("school", ""))
                         pool = [
                             h for h in all_hist
                             if h["min_pct"] >= 20
                             and h["usg"] >= 10
-                            and abs(conf_tier(h["conf"]) - player_conf_tier) <= 2
+                            and abs(conf_tier(h["conf"]) - player_conf_tier) <= 1
                         ]
 
                         scored = []
@@ -1312,3 +1276,4 @@ with tab5:
                                 "</div>"
                             )
                             st.markdown(html, unsafe_allow_html=True)
+                            
