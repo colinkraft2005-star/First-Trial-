@@ -896,7 +896,9 @@ UCLA_ROSTER_CARDS = [
 
 @st.cache_data(ttl=3600)
 def fetch_torvik_year(year):
-    url = f"https://barttorvik.com/getadvstats.php?year={year}&specialSource=0&conyes=0&start={year-1}1101&end={year}0501&top=365&xvalue=All&page=playerstat&team="
+    start = f"{year-1}1101"
+    end   = f"{year}0501"
+    url = f"https://barttorvik.com/getadvstats.php?year={year}&specialSource=0&conyes=0&start={start}&end={end}&top=365&xvalue=All&page=playerstat&team="
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -915,15 +917,31 @@ def fetch_torvik_year(year):
                     return float(v) if v not in (None, "") else 0.0
                 except:
                     return 0.0
-            # row[22] = class year, row[23] = height in inches (from this endpoint)
-            raw_height = row[23] if len(row) > 23 else ""
+
+            # row[22] = class (Fr/So/Jr/Sr), row[23] = height string like "6-10" or inches-only
+            raw_ht = str(row[23]) if len(row) > 23 else ""
+            # BartTorvik returns height as total inches (e.g. 82 for 6'10")
+            # but sometimes as "6-10" string - handle both
+            height_in = 78  # default 6'6"
+            height_str = ""
             try:
-                height_in = int(raw_height)
+                if "-" in raw_ht:
+                    parts = raw_ht.split("-")
+                    height_in = int(parts[0]) * 12 + int(parts[1])
+                elif raw_ht.isdigit():
+                    val = int(raw_ht)
+                    # if val is small (< 12), it's just inches part — but we don't know feet
+                    # values 60-90 are total inches (5'0" to 7'6"), anything else is bad data
+                    if 60 <= val <= 96:
+                        height_in = val
+                    else:
+                        height_in = 78
                 feet = height_in // 12
                 inches = height_in % 12
                 height_str = f"{feet}'{inches}\""
             except:
-                height_str = str(raw_height)
+                height_str = raw_ht
+                height_in = 78
 
             results.append({
                 "name": str(row[0]),
@@ -932,7 +950,7 @@ def fetch_torvik_year(year):
                 "year": year,
                 "cls": str(row[22]) if len(row) > 22 else "",
                 "height": height_str,
-                "height_in": int(raw_height) if str(raw_height).isdigit() else 78,
+                "height_in": height_in,
                 "ts": sf(8),
                 "usg": sf(6),
                 "p3": sf(21) * 100,
@@ -1236,8 +1254,14 @@ with tab5:
                     if not all_hist:
                         st.warning("Could not load historical data from BartTorvik.")
                     else:
-                        # filter to players with meaningful minutes
-                        pool = [h for h in all_hist if h["min_pct"] >= 20 and h["usg"] >= 10]
+                        # filter to players with meaningful minutes, and within 2 conf tiers
+                        player_conf_tier = conf_tier(p.get("school", ""))
+                        pool = [
+                            h for h in all_hist
+                            if h["min_pct"] >= 20
+                            and h["usg"] >= 10
+                            and abs(conf_tier(h["conf"]) - player_conf_tier) <= 2
+                        ]
 
                         scored = []
                         for h in pool:
