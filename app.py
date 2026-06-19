@@ -896,7 +896,7 @@ UCLA_ROSTER_CARDS = [
 
 @st.cache_data(ttl=3600)
 def fetch_torvik_year(year):
-    url = f"https://barttorvik.com/getadvstats.php?year={year}&page=playerstat&json=1"
+    url = f"https://barttorvik.com/getadvstats.php?year={year}&specialSource=0&conyes=0&start={year-1}1101&end={year}0501&top=365&xvalue=All&page=playerstat&team="
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -907,7 +907,7 @@ def fetch_torvik_year(year):
         raw = resp.json()
         results = []
         for row in raw:
-            if len(row) < 53:
+            if len(row) < 24:
                 continue
             def sf(idx):
                 try:
@@ -915,13 +915,24 @@ def fetch_torvik_year(year):
                     return float(v) if v not in (None, "") else 0.0
                 except:
                     return 0.0
+            # row[22] = class year, row[23] = height in inches (from this endpoint)
+            raw_height = row[23] if len(row) > 23 else ""
+            try:
+                height_in = int(raw_height)
+                feet = height_in // 12
+                inches = height_in % 12
+                height_str = f"{feet}'{inches}\""
+            except:
+                height_str = str(raw_height)
+
             results.append({
                 "name": str(row[0]),
                 "team": str(row[1]),
                 "conf": str(row[2]),
                 "year": year,
-                "cls": str(row[25]) if len(row) > 25 else "",
-                "height": "",
+                "cls": str(row[22]) if len(row) > 22 else "",
+                "height": height_str,
+                "height_in": int(raw_height) if str(raw_height).isdigit() else 78,
                 "ts": sf(8),
                 "usg": sf(6),
                 "p3": sf(21) * 100,
@@ -995,24 +1006,23 @@ def score_historical_comp(player, hist):
 
     # --- FOUNDATION: always fixed ---
     player_h = height_inches(player.get("height", "6'6\""))
-    hist_h = height_inches(hist.get("height", "6'6\""))
-    # only use height score if both have valid heights
-    height_score = nd2(player_h, hist_h, 3) if hist_h != 76 else 0.5
+    hist_h = hist.get("height_in", 78)
+    height_score = nd2(player_h, hist_h, 3)
 
-    # infer hist position from stats: guards have high AST, bigs have high BLK+ORB
+    # infer hist position from height + stats
     hist_ast = hist["ast"]
     hist_blk = hist["blk"]
     hist_orb = hist["orb"]
-    if hist_ast > 22:
-        hist_pos = 0  # guard/playmaker
-    elif hist_ast > 14:
-        hist_pos = 1  # combo guard
-    elif hist_blk < 3 and hist_orb < 5:
-        hist_pos = 2  # wing
-    elif hist_blk > 5 or hist_orb > 8:
-        hist_pos = 4  # big
+    if hist_h <= 74:
+        hist_pos = 0 if hist_ast > 20 else 1
+    elif hist_h <= 77:
+        hist_pos = 1 if hist_ast > 18 else 2
+    elif hist_h <= 80:
+        hist_pos = 2 if hist_blk < 4 else 3
+    elif hist_h <= 83:
+        hist_pos = 3 if hist_orb < 8 else 4
     else:
-        hist_pos = 3  # forward
+        hist_pos = 4
 
     player_pos = pos_group(player.get("pos", "wing"))
     pos_score = nd2(player_pos, hist_pos, 1.5)
