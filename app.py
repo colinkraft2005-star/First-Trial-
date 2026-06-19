@@ -4,6 +4,7 @@ import requests
 import sqlite3
 import urllib.parse
 import re
+import math
 import ssl
 import urllib3
 import time
@@ -872,395 +873,218 @@ PORTAL_PLAYERS = [
     {"name":"Bishop Boswell","school":"Tennessee","pos":"G/CG","cls":"So","height":"6'4\"","tier":"Tier 3","shooting":74,"playmaking":64,"defense":70,"rebounding":62,"tags":["Three-Level Scorer","86% FT","62% FTR","64.4 TS"],"projection":"High-major guard","role":"Three-Level Scoring Guard","ts":"64.4","usg":"23.0","p3":"37.0","writeup":"23% usage, 124.8 ORTG, 64.4 TS. Efficient three-level scorer who gets to the line and hits 86%. Finishes well at the rim and shoots 37% from three. Strong frame, physical downhill guard, smart and tough."},
     {"name":"KJ Lewis","school":"Georgetown","pos":"CG","cls":"Jr","height":"6'4\"","tier":"Tier 3","shooting":52,"playmaking":62,"defense":64,"rebounding":64,"tags":["Strong Frame","Transition Threat","Secondary Playmaker","3rd Team All Big East"],"projection":"High-major rotation guard","role":"Physical Downhill Guard","ts":"54.0","usg":"22.0","p3":"28.0","writeup":"Physically strong, downhill guard who rebounds well for his position and brings real value in transition. Non-shooter. Fits as a high-major 2 guard and secondary scoring option. 3rd team All Big East."},
     {"name":"Noah Feddersen","school":"North Dakota State","pos":"PF/C","cls":"Jr","height":"6'10\"","tier":"Tier 3","shooting":52,"playmaking":46,"defense":62,"rebounding":70,"tags":["Soft Hands","Efficient Interior","Low-Mistake Big","Surprisingly Athletic"],"projection":"High-major backup 5","role":"Low-Mistake Interior Big","ts":"58.0","usg":"16.0","p3":"0","writeup":"Really solid functional big who can scale up because of how clean and controlled his game is. Efficient around the rim with good touch, soft hands, and better-than-expected athleticism for his size."},
-    {"name":"Oswin Erhunmwunse","school":"Providence","pos":"PF/C","cls":"So","height":"6'10\"","tier":"Tier 4","shooting":30,"playmaking":42,"defense":70,"rebounding":84,"tags":["Elite Wedger","Drop Defender","Rim Finisher"],"projection":"High-major scheme fit big","role":"Drop Center / Rim Presence","ts":"68.0","usg":"18.0","p3":"0","writeup":"Massive interior presence. 10% block rate, 72% on close 2s. Elite wedge on the offensive glass. Strong drop-coverage defender."},
     {"name":"Carey Booth","school":"Colorado State","pos":"F","cls":"Jr","height":"6'10\"","tier":"Tier 4","shooting":62,"playmaking":42,"defense":68,"rebounding":72,"tags":["Athletic Complementary Big","Defensive Rebounder","Lob Threat"],"projection":"Mid-major starter","role":"Athletic Complementary Big","ts":"58.0","usg":"16.0","p3":"33.0","writeup":"Strong defensive rebounder with solid block rate. Efficient around the rim. Best when cutting, in the dunker spot, or finishing lobs. Projects as a starter at a strong mid-major or 8th-9th man on a good Power 5 team."},
     {"name":"Isaiah Malone","school":"Florida Gulf Coast","pos":"Wing/F","cls":"Jr","height":"6'8\"","tier":"Tier 4","shooting":58,"playmaking":50,"defense":64,"rebounding":66,"tags":["Super Bouncy","Natural Weak-Side Blocker","Aggressive Downhill","Jumper Upside"],"projection":"High-major rotational big","role":"Athletic Wing / Weak-Side Blocker","ts":"58.0","usg":"19.0","p3":"52.9","writeup":"Long, athletic, explosive forward. Super bouncy and clearly more athletic than most. Natural weak-side shot blocker. Quick off two feet and plays above the rim easily. Could be a rotational big at a high major off of pure athleticism."},
     {"name":"Ben Hammond","school":"Virginia Tech","pos":"PG/CG","cls":"So","height":"5'11\"","tier":"Tier 4","shooting":74,"playmaking":72,"defense":70,"rebounding":50,"tags":["Low Turnover","Active Hands","High IQ","Real Shooter"],"projection":"High-major role guard","role":"Low-Mistake Floor-Spacing Guard","ts":"60.0","usg":"16.0","p3":"38.0","writeup":"Low-mistake, high-IQ combo guard whose value starts with shooting and decision-making. Does not turn the ball over. Legit three-point weapon on catch-and-shoot. Defensively plays with edge, averages around two steals per game."},
     {"name":"Jack Karasinski","school":"Bellarmine","pos":"Wing/F","cls":"So","height":"6'7\"","tier":"Tier 4","shooting":80,"playmaking":44,"defense":56,"rebounding":60,"tags":["44.9% FG","77.4% on Cuts","Elite Spot-Up","Non-Creator"],"projection":"High-major depth stretch 4","role":"Spot-Up Shooter / Cutter","ts":"65.0","usg":"16.0","p3":"39.0","writeup":"Elite efficiency wing who thrives without the ball. 44.9% FG, 77.4% on cuts. 129.5 ORTG, 65% TS. Un-athletic stretch 4 who could play 18-25 minutes and be effective."},
     {"name":"Blake Barklay","school":"East Tennessee State","pos":"Wing/F","cls":"So","height":"6'8\"","tier":"Tier 3","shooting":68,"playmaking":52,"defense":62,"rebounding":62,"tags":["Efficient Role Wing","36% from 3","Post Mismatch","Low Foul Rate"],"projection":"High-major rotation piece","role":"Versatile Role Wing","ts":"60.0","usg":"18.0","p3":"36.0","writeup":"Projects better than a lot of mid-major forwards. Efficient, plays under control. 36% from three on about 40 attempts. Can put it on the deck and attack on hard closeouts. Can absolutely be an effective high-major rotation piece."},
-    {"name":"Gavin Doty","school":"Siena","pos":"G","cls":"So","height":"6'5\"","tier":"Tier 4","shooting":72,"playmaking":68,"defense":58,"rebounding":68,"tags":["Controlled Iso Scorer","Midrange Bag","Low Turnover","Strong Rebounder for Guard"],"projection":"High mid-major scorer","role":"Iso Mid-Range Scorer","ts":"57.0","usg":"22.6","p3":"28.0","writeup":"Plays 90% of minutes and scores efficiently (122.8 ORTG, 57 TS%) on solid usage (22.6%) while taking great care of the ball. Controlled, iso-heavy scorer who operates from the top of the key and lives in the midrange."},
+    {"name":"Gavin Doty","school":"Siena","pos":"G","cls":"So","height":"6'5\"","tier":"Tier 4","shooting":72,"playmaking":68,"defense":58,"rebounding":68,"tags":["Controlled Iso Scorer","Midrange Bag","Low Turnover","Strong Rebounder for Guard"],"projection":"High mid-major scorer","role":"Iso Mid-Range Scorer","ts":"57.0","usg":"22.6","p3":"28.0","writeup":"Plays 90% of minutes and scores efficiently on solid usage while taking great care of the ball. Controlled, iso-heavy scorer who operates from the top of the key and lives in the midrange."},
     {"name":"Sonny Wilson","school":"Toledo","pos":"CG","cls":"Jr","height":"6'1\"","tier":"Tier 4","shooting":76,"playmaking":68,"defense":52,"rebounding":50,"tags":["41% from 3","Snake Screen Specialist","Low Turnover","Crafty Scorer"],"projection":"High-major starter","role":"Ball Screen Scoring Guard","ts":"60.0","usg":"23.0","p3":"41.0","writeup":"Skilled offensive guard with real value as a shot-maker and low-turnover ball handler. 17 PPG with 23% usage, shot 41% from three on about 100 attempts. Really good in the midrange coming off ball screens."},
     {"name":"Chol Machot","school":"Charleston","pos":"F/C","cls":"RS So","height":"7'0\"","tier":"Tier 4","shooting":42,"playmaking":38,"defense":72,"rebounding":82,"tags":["Elite Length","High Motor","Rim Protector","Transition Runner"],"projection":"High-major role big","role":"Rim Protector / Energy Big","ts":"56.0","usg":"16.0","p3":"0","writeup":"Long, high-motor rim protector who generates value through rebounding and shot blocking. Elite length, blocks shots outside his area. Runs the floor extremely well for his size. Projects as a high-major role big."},
 ]
 
-UCLA_ROSTER_CARDS = [
-    {"name":"Trent Perry","school":"UCLA","cls":"So","pos":"G","height":"6'4\"","tier":"Tier 2","shooting":81,"playmaking":72,"defense":74,"rebounding":55,"tags":["Pick & Roll Initiator","Off-Ball Shooter","Serviceable Defender"],"projection":"Power 4 lead guard","role":"Lead Guard / Pick & Roll Initiator"},
-    {"name":"Jaylen Petty","school":"UCLA","cls":"So","pos":"G","height":"6'1\"","tier":"Tier 3","shooting":89,"playmaking":75,"defense":61,"rebounding":68,"tags":["Catch & Shoot Specialist","Jet Cut Weapon","Off-Ball Scorer"],"projection":"Big Ten secondary scorer","role":"Off-Ball Shooter / Jet Cut Weapon"},
-    {"name":"Xavier Booker","school":"UCLA","cls":"Jr","pos":"PF/C","height":"6'11\"","tier":"Tier 3","shooting":91,"playmaking":52,"defense":68,"rebounding":72,"tags":["Pick & Pop Assassin","Floor Spacer","Drop Defender"],"projection":"Starting stretch 5","role":"Pick & Pop Stretch 5"},
-    {"name":"Eric Dailey Jr.","school":"UCLA","cls":"Sr","pos":"Wing","height":"6'6\"","tier":"Tier 3","shooting":68,"playmaking":62,"defense":78,"rebounding":72,"tags":["Versatile Defender","Motor Guy","Dunker Spot"],"projection":"High-major role wing","role":"Two-Way Wing / Dunker Spot"},
-    {"name":"Filip Jovic","school":"UCLA","cls":"So","pos":"Wing","height":"6'8\"","tier":"Tier 3","shooting":80,"playmaking":70,"defense":65,"rebounding":68,"tags":["Stretch 4","Secondary Creator","Floor Spacer"],"projection":"High-major starter","role":"Secondary Creator / Stretch 4"},
-    {"name":"Brandon Williams","school":"UCLA","cls":"So","pos":"Wing/F","height":"6'7\"","tier":"Tier 4","shooting":62,"playmaking":55,"defense":74,"rebounding":70,"tags":["Multipositional Defender","Glue Piece"],"projection":"Power 4 role piece","role":"Multipositional Glue Wing"},
-    {"name":"Eric Freeny","school":"UCLA","cls":"Fr","pos":"G","height":"6'4\"","tier":"Tier 4","shooting":60,"playmaking":65,"defense":72,"rebounding":55,"tags":["Defensive Disruptor","Transition Initiator","High Motor"],"projection":"Power 4 bench guard","role":"Defensive Disruptor / Bench Guard"},
-    {"name":"Azavier Robinson","school":"UCLA","cls":"Fr","pos":"G","height":"6'2\"","tier":"Tier 4","shooting":73,"playmaking":72,"defense":90,"rebounding":65,"tags":["Elite Perimeter Lockdown","Defensive Disruptor","High Motor"],"projection":"High-usage bench spark","role":"Perimeter Lockdown Guard"},
-]
 
-@st.cache_data(ttl=3600)
-def fetch_torvik_year(year):
-    start = f"{year-1}1101"
-    end   = f"{year}0501"
-    url = f"https://barttorvik.com/getadvstats.php?year={year}&specialSource=0&conyes=0&start={start}&end={end}&top=365&xvalue=All&page=playerstat&team="
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://barttorvik.com/"
-    }
+def parse_height_inches(ht_str):
+    """Convert height string like 6'7" or 6-7 to total inches. Clean and reliable."""
     try:
-        resp = requests.get(url, headers=headers, verify=False, timeout=20)
-        raw = resp.json()
-        results = []
-        for row in raw:
-            if len(row) < 24:
-                continue
-            def sf(idx):
-                try:
-                    v = row[idx]
-                    return float(v) if v not in (None, "") else 0.0
-                except:
-                    return 0.0
-            # row[23] confirmed as height per scraper.py
-            # BartTorvik stores height as total inches e.g. 82 = 6'10"
-            try:
-                total_in = int(float(str(row[23])))
-                if not (60 <= total_in <= 96):
-                    total_in = 78
-                height_str = f"{total_in // 12}'{total_in % 12}\""
-            except:
-                total_in = 78
-                height_str = "6'6\""
-            results.append({
-                "name": str(row[0]),
-                "team": str(row[1]),
-                "conf": str(row[2]),
-                "year": year,
-                "height_in": total_in,
-                "height": height_str,
-                "ts": sf(8),
-                "usg": sf(6),
-                "p3": sf(21) * 100,
-                "ast": sf(11),
-                "blk": sf(22),
-                "stl": sf(23),
-                "orb": sf(9),
-                "drb": sf(10),
-                "bpm": sf(50),
-                "dbpm": sf(52),
-                "min_pct": sf(4),
-            })
-        return results
-    except:
-        return []
-
-
-def conf_tier(conf):
-    c = (conf or "").lower()
-    if any(x in c for x in ["big ten", "big 12", "sec", "acc", "big east", "pac"]):
-        return 1
-    if any(x in c for x in ["wcc", "a-10", "a10", "mwc", "aac", "american"]):
-        return 2
-    if any(x in c for x in ["mvc", "socon", "caa", "horizon", "summit", "asun"]):
-        return 3
-    return 4
-
-
-def height_inches(h):
-    try:
-        h = str(h).replace('"', '').strip()
-        if "'" in h:
-            parts = h.split("'")
-            return int(parts[0]) * 12 + (int(parts[1]) if parts[1].strip() else 0)
-        if "-" in h:
-            parts = h.split("-")
-            return int(parts[0]) * 12 + (int(parts[1]) if parts[1].strip() else 0)
-        val = int(h)
-        return val if val > 10 else val * 12
+        s = str(ht_str).replace('"', '').strip()
+        if "\'" in s:
+            parts = s.split("\'")
+            return int(parts[0].strip()) * 12 + (int(parts[1].strip()) if parts[1].strip().isdigit() else 0)
+        if "-" in s:
+            parts = s.split("-")
+            return int(parts[0].strip()) * 12 + int(parts[1].strip())
+        val = int(s)
+        return val if val > 12 else val * 12
     except:
         return 78
 
 
-def pos_group(pos):
-    p = (pos or "").lower()
-    if any(x in p for x in ["pg", "point"]):
-        return 0
-    if any(x in p for x in ["sg", "combo", "cg", "g/"]):
-        return 1
-    if any(x in p for x in ["wing", "sf", "g/w", "w/"]):
-        return 2
-    if any(x in p for x in ["pf", "forward", "f/"]):
-        return 3
-    if any(x in p for x in ["/c", "center"]) or p.strip() == "c":
-        return 4
-    return 2
+def get_bar_color(score):
+    if score >= 80:
+        return "#2774AE"
+    if score >= 65:
+        return "#F0B429"
+    return "#DC2626"
 
 
-def score_historical_comp(player, hist):
-    """
-    Torvik-style statistical fingerprint matching.
-    - Normalize all rates to per-possession (already are in BartTorvik)
-    - Build a fingerprint vector across all key production dimensions
-    - Hard filter on height (+/-3in), position (1 bucket), conf (1 tier)
-    - Dominant skill gets 2x weight in the fingerprint
-    """
-    def nd2(a, b, r):
-        try:
-            return max(0.0, 1.0 - abs(float(a) - float(b)) / r)
-        except:
-            return 0.0
+def render_card_html(player, show_writeup=False):
+    sh_c = get_bar_color(player["shooting"])
+    df_c = get_bar_color(player["defense"])
+    pl_c = get_bar_color(player["playmaking"])
+    rb_c = get_bar_color(player["rebounding"])
+    tags_html = "".join([
+        "<span style=\"background:#e8f1f9;color:#2774AE;font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:3px 9px;border-radius:3px;border:1px solid #b8d3ec;margin:2px;display:inline-block;text-transform:uppercase;letter-spacing:.04em;\">" + t + "</span>"
+        for t in player.get("tags", [])
+    ])
+    writeup_html = ""
+    if show_writeup and player.get("writeup"):
+        writeup_html = f'<div style="padding:10px 14px;border-top:1px solid #e5e7eb;font-size:12px;line-height:1.65;color:#374151;">{player["writeup"]}</div>'
 
-    # === HARD FILTERS: eliminate bad matches before scoring ===
-    # Height
-    player_h = height_inches(player.get("height", "6'6\""))
-    hist_h = hist.get("height_in", 78)
-    if abs(player_h - hist_h) > 3:
-        return 0.0
-
-    # Position
-    player_pos = pos_group(player.get("pos", "wing"))
-    h_ast = hist["ast"]
-    h_blk = hist["blk"]
-    h_orb = hist["orb"]
-    if h_ast >= 20 and h_orb <= 6:
-        hist_pos = 0
-    elif h_ast >= 14 and h_blk <= 3:
-        hist_pos = 1
-    elif h_blk <= 4 and h_orb <= 7:
-        hist_pos = 2
-    elif h_blk >= 5 or h_orb >= 9:
-        hist_pos = 4
-    else:
-        hist_pos = 3
-    if abs(player_pos - hist_pos) > 1:
-        return 0.0
-
-    # Conference tier
-    player_conf = conf_tier(player.get("school", ""))
-    hist_conf = conf_tier(hist["conf"])
-    if abs(player_conf - hist_conf) > 1:
-        return 0.0
-
-    # === TORVIK-STYLE FINGERPRINT ===
-    # All stats already per-possession normalized from BartTorvik
-    # Map player card skill ratings to comparable stat dimensions
-
-    # Shooting fingerprint: TS%, 3P rate, eFG proxy
-    shoot_rating = float(player.get("shooting", 60))
-    # TS% comparison: player card shooting 60=avg(55% TS), 80=elite(65% TS)
-    player_ts = 45 + (shoot_rating / 100) * 25  # maps 0-100 -> 45-70% TS
-    ts_comp = nd2(player_ts, hist["ts"], 8)
-    p3_comp = nd2(float(player.get("p3", 0) or 0), hist["p3"], 10)
-
-    # Usage/role fingerprint
-    player_usg = float(player.get("usg", 18) or 18)
-    usg_comp = nd2(player_usg, hist["usg"], 6)
-
-    # Playmaking fingerprint: AST%
-    play_rating = float(player.get("playmaking", 60))
-    player_ast = play_rating / 3.5  # maps 0-100 -> 0-28% AST
-    ast_comp = nd2(player_ast, hist["ast"], 7)
-
-    # Rebounding fingerprint: ORB% + DRB%
-    reb_rating = float(player.get("rebounding", 60))
-    player_orb = (reb_rating / 100) * 12
-    player_drb = (reb_rating / 100) * 20
-    orb_comp = nd2(player_orb, hist["orb"], 4)
-    drb_comp = nd2(player_drb, hist["drb"], 6)
-
-    # Defensive fingerprint: BLK%, STL%, DBPM
-    def_rating = float(player.get("defense", 60))
-    player_dbpm = (def_rating - 50) / 10
-    player_blk = (def_rating / 100) * 8
-    player_stl = (def_rating / 100) * 3.5
-    blk_comp = nd2(player_blk, hist["blk"], 3)
-    stl_comp = nd2(player_stl, hist["stl"], 1.5)
-    dbpm_comp = nd2(player_dbpm, hist["dbpm"], 2)
-
-    # === DOMINANT SKILL DETECTION ===
-    shooting   = float(player.get("shooting", 60))
-    defense    = float(player.get("defense", 60))
-    playmaking = float(player.get("playmaking", 60))
-    rebounding = float(player.get("rebounding", 60))
-    skills = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
-    dominant = max(skills, key=skills.get)
-    dom_val = skills[dominant]
-
-    # Base fingerprint weights (Torvik-style, all dimensions matter)
-    w = {
-        "ts":   0.12,
-        "p3":   0.08,
-        "usg":  0.10,
-        "ast":  0.10,
-        "orb":  0.08,
-        "drb":  0.07,
-        "blk":  0.08,
-        "stl":  0.07,
-        "dbpm": 0.08,
-        "height": 0.12,
-        "pos":  0.10,
-    }
-
-    # Boost dominant skill dimensions by 2x, redistribute from weaker ones
-    if dom_val >= 75:
-        if dominant == "shooting":
-            w["ts"] = 0.20; w["p3"] = 0.14; w["usg"] = 0.10
-            w["ast"] = 0.06; w["orb"] = 0.04; w["drb"] = 0.04
-            w["blk"] = 0.04; w["stl"] = 0.04; w["dbpm"] = 0.04
-            w["height"] = 0.16; w["pos"] = 0.14
-        elif dominant == "rebounding":
-            w["ts"] = 0.06; w["p3"] = 0.03; w["usg"] = 0.08
-            w["ast"] = 0.05; w["orb"] = 0.16; w["drb"] = 0.14
-            w["blk"] = 0.08; w["stl"] = 0.04; w["dbpm"] = 0.06
-            w["height"] = 0.16; w["pos"] = 0.14
-        elif dominant == "defense":
-            w["ts"] = 0.06; w["p3"] = 0.03; w["usg"] = 0.07
-            w["ast"] = 0.05; w["orb"] = 0.06; w["drb"] = 0.06
-            w["blk"] = 0.14; w["stl"] = 0.12; w["dbpm"] = 0.15
-            w["height"] = 0.12; w["pos"] = 0.14
-        elif dominant == "playmaking":
-            w["ts"] = 0.08; w["p3"] = 0.05; w["usg"] = 0.10
-            w["ast"] = 0.22; w["orb"] = 0.04; w["drb"] = 0.04
-            w["blk"] = 0.03; w["stl"] = 0.06; w["dbpm"] = 0.04
-            w["height"] = 0.16; w["pos"] = 0.18
-
-    return (
-        ts_comp   * w["ts"]   +
-        p3_comp   * w["p3"]   +
-        usg_comp  * w["usg"]  +
-        ast_comp  * w["ast"]  +
-        orb_comp  * w["orb"]  +
-        drb_comp  * w["drb"]  +
-        blk_comp  * w["blk"]  +
-        stl_comp  * w["stl"]  +
-        dbpm_comp * w["dbpm"] +
-        nd2(player_h, hist_h, 2)               * w["height"] +
-        nd2(player_pos, hist_pos, 1.0)          * w["pos"]
-    )
-
-
-def skill_bar_html(label, value):
-    if value >= 80:
-        color = "#2774AE"
-        text_color = "#2774AE"
-    elif value >= 65:
-        color = "#F0B429"
-        text_color = "#c07a00"
-    else:
-        color = "#dc2626"
-        text_color = "#dc2626"
-    return (
-        "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:5px;\">"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#374151 !important;width:82px;flex-shrink:0;\">" + label + "</div>"
-        "<div style=\"flex:1;height:5px;background:#e5e7eb;border-radius:2px;overflow:hidden;border:1px solid #d1d5db;\">"
-        "<div style=\"height:100%;width:" + str(value) + "%;background:" + color + ";border-radius:2px;\"></div>"
-        "</div>"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;width:28px;text-align:right;font-weight:500;color:" + text_color + " !important;\">" + str(value) + "</div>"
-        "</div>"
-    )
-
-
-def player_card_html(p, show_writeup=False):
-    tier = p.get("tier", "")
-    ts = p.get("ts", "")
-    usg = p.get("usg", "")
-    p3 = p.get("p3", "0")
-    name = p.get("name", "")
-    height = p.get("height", "")
-    pos = p.get("pos", "")
-    cls = p.get("cls", "")
-    school = p.get("school", "")
-    projection = p.get("projection", "")
-    role = p.get("role", "")
-
+    ts = player.get("ts", "")
+    usg = player.get("usg", "")
+    p3 = player.get("p3", "0")
     stats_html = ""
     if ts:
-        stats_html = (
-            "<div style=\"display:flex;border-bottom:1px solid #dde2ee;background:#ffffff !important;\">"
-            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;color:#111827 !important;\">" + str(ts) + "%</span>"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280 !important;display:block;margin-top:2px;\">TS%</span>"
-            "</div>"
-            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;color:#111827 !important;\">" + str(usg) + "%</span>"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280 !important;display:block;margin-top:2px;\">USG%</span>"
-            "</div>"
-            "<div style=\"flex:1;padding:9px 0;text-align:center;\">"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;color:#111827 !important;\">" + str(p3) + "%</span>"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280 !important;display:block;margin-top:2px;\">3P%</span>"
-            "</div>"
-            "</div>"
-        )
+        stats_html = f'''
+        <div style="display:flex;border-bottom:1px solid #e5e7eb;background:#fff;">
+            <div style="flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;">
+                <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500;color:#111827;">{ts}%</span>
+                <span style="display:block;font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;margin-top:2px;">TS%</span>
+            </div>
+            <div style="flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;">
+                <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500;color:#111827;">{usg}%</span>
+                <span style="display:block;font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;margin-top:2px;">USG%</span>
+            </div>
+            <div style="flex:1;padding:9px 0;text-align:center;">
+                <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500;color:#111827;">{p3}%</span>
+                <span style="display:block;font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;margin-top:2px;">3P%</span>
+            </div>
+        </div>'''
 
-    tags_html = "".join([
-        "<span style=\"font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.05em;text-transform:uppercase;padding:4px 9px;border-radius:3px;background:#e8f1f9;border:1px solid #b8d3ec;color:#2774AE;font-weight:500;margin:2px;display:inline-block;\">" + t + "</span>"
-        for t in p.get("tags", [])
-    ])
+    def bar(label, val, color):
+        return f'''<div style="margin-bottom:6px;">
+            <div style="display:flex;justify-content:space-between;font-family:'DM Mono',monospace;font-size:9px;text-transform:uppercase;color:#374151;margin-bottom:2px;"><span>{label}</span><span style="color:{color};font-weight:600;">{val}</span></div>
+            <div style="background:#e5e7eb;border-radius:2px;height:5px;overflow:hidden;"><div style="height:100%;width:{val}%;background:{color};border-radius:2px;"></div></div>
+        </div>'''
 
-    skills_html = (
-        skill_bar_html("Shooting", p.get("shooting", 0)) +
-        skill_bar_html("Defense", p.get("defense", 0)) +
-        skill_bar_html("Playmaking", p.get("playmaking", 0)) +
-        skill_bar_html("Rebounding", p.get("rebounding", 0))
-    )
-
-    writeup_section = ""
-    if show_writeup and p.get("writeup"):
-        writeup_section = (
-            "<div style=\"padding:10px 14px;border-top:1px solid #dde2ee;font-size:12px;line-height:1.65;color:#4b5577;\">"
-            + p["writeup"] +
-            "</div>"
-        )
-
-    return (
-        "<div style=\"background:#ffffff !important;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12),0 4px 16px rgba(0,0,0,.08);margin-bottom:14px;color:#111827 !important;\">"
-        "<div style=\"padding:14px 16px 10px;border-bottom:1px solid #dde2ee;background:#ffffff !important;\">"
-        "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;\">"
-        "<div>"
-        "<div style=\"font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:800;letter-spacing:.02em;line-height:1;color:#111827 !important;\">" + name + "</div>"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;color:#6b7280 !important;margin-top:4px;\">" + height + " &nbsp;&middot;&nbsp; " + pos + " &nbsp;&middot;&nbsp; " + cls + " &nbsp;&middot;&nbsp; " + school + "</div>"
-        "</div>"
-        "<span style=\"font-family:'DM Mono',monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a !important;white-space:nowrap;font-weight:600;\">" + tier + "</span>"
-        "</div>"
-        "</div>"
-        + stats_html +
-        "<div style=\"padding:12px 16px 8px;background:#ffffff !important;\">" + skills_html + "</div>"
-        "<div style=\"padding:0 16px 10px;background:#ffffff !important;\">" + tags_html + "</div>"
-        "<div style=\"padding:10px 16px;border-top:1px solid #dde2ee;background:#f5f7fb !important;\">"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280 !important;\">" + tier + "</div>"
-        "<div style=\"font-size:12px;font-weight:600;color:#111827 !important;margin-top:1px;\">" + projection + "</div>"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#2774AE !important;margin-top:2px;\">" + role + "</div>"
-        "</div>"
-        + writeup_section +
-        "</div>"
-    )
+    return f'''<div style="background:#ffffff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:14px;">
+        <div style="padding:14px 16px 10px;border-bottom:1px solid #e5e7eb;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+                <div>
+                    <div style="font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;color:#111827;letter-spacing:.02em;">{player["name"]}</div>
+                    <div style="font-family:'DM Mono',monospace;font-size:10px;color:#6b7280;margin-top:3px;">{player.get("height","")} &middot; {player.get("pos","")} &middot; {player.get("cls","")} &middot; {player.get("school","")}</div>
+                </div>
+                <span style="font-family:'DM Mono',monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;font-weight:600;">{player.get("tier","")}</span>
+            </div>
+        </div>
+        {stats_html}
+        <div style="padding:12px 16px 6px;">
+            {bar("Shooting", player["shooting"], sh_c)}
+            {bar("Defense", player["defense"], df_c)}
+            {bar("Playmaking", player["playmaking"], pl_c)}
+            {bar("Rebounding", player["rebounding"], rb_c)}
+        </div>
+        <div style="padding:0 16px 10px;">{tags_html}</div>
+        <div style="padding:10px 16px;border-top:1px solid #e5e7eb;background:#f9fafb;">
+            <div style="font-size:12px;font-weight:700;color:#111827;">{player.get("projection","")}</div>
+            <div style="font-family:'DM Mono',monospace;font-size:9px;color:#2774AE;margin-top:2px;">{player.get("role","")}</div>
+        </div>
+        {writeup_html}
+    </div>'''
 
 
-def comp_score(sub_ts, sub_usg, sub_p3, sub_tier, hist):
-    def nd2(a, b, r):
-        return max(0, 1 - abs(a - b) / r)
-    s = 0
-    s += nd2(float(sub_ts or 0), hist["before_ts"], 20) * 0.20
-    s += nd2(float(sub_usg or 0), hist["before_usg"], 18) * 0.18
-    s += nd2(float(sub_p3 or 0), hist["before_p3"], 18) * 0.15
-    s += nd2(sub_tier, hist["before_tier"], 2) * 0.20
-    s += nd2(hist["before_ppg"], hist.get("after_ppg", hist["before_ppg"]), 8) * 0.15
-    s += nd2(hist["before_rpg"], hist.get("after_rpg", hist["before_rpg"]), 5) * 0.12
-    return s
+def score_comp(player, hist_row):
+    """
+    Torvik-style fingerprint scoring using df_all rows.
+    df_all has clean HEIGHT strings already parsed by Trey's app.
+    Hard filters: height +/-3in, then full stat fingerprint with dominant skill boost.
+    """
+    try:
+        p_h = parse_height_inches(player.get("height", "6'6\""))
+        h_h = parse_height_inches(str(hist_row.get("HEIGHT", "6'6\"")))
+        if abs(p_h - h_h) > 3:
+            return 0.0
+
+        def nd(a, b, r):
+            try:
+                return max(0.0, 1.0 - abs(float(a) - float(b)) / r)
+            except:
+                return 0.0
+
+        # Core stat comparisons against df_all columns
+        p_ts  = float(player.get("ts", 58) or 58)
+        p_usg = float(player.get("usg", 18) or 18)
+        p_p3  = float(player.get("p3", 0) or 0)
+
+        h_ts  = float(hist_row.get("TS", 55))
+        h_ts  = h_ts * 100 if h_ts <= 1.0 else h_ts
+        h_usg = float(hist_row.get("USG", 18))
+        h_bpm = float(hist_row.get("BPM", 0))
+        h_dbpm = float(hist_row.get("DBPM", 0))
+        h_efg  = float(hist_row.get("EFG", 50))
+        h_ast  = float(hist_row.get("AST", 15))
+        h_orb  = float(hist_row.get("OR", 5))
+        h_drb  = float(hist_row.get("DR", 10))
+        h_blk  = float(hist_row.get("BLK", 3))
+        h_stl  = float(hist_row.get("STL", 2))
+        h_p3   = float(hist_row.get("THREE_P", 30)) if "THREE_P" in hist_row.index else p_p3
+
+        # Skill ratings from card
+        shooting   = float(player.get("shooting", 60))
+        defense    = float(player.get("defense", 60))
+        playmaking = float(player.get("playmaking", 60))
+        rebounding = float(player.get("rebounding", 60))
+
+        # Map card ratings to stat dimensions
+        p_ts_mapped  = 45 + (shooting / 100) * 25
+        p_efg_mapped = 40 + (shooting / 100) * 20
+        p_dbpm_mapped = (defense - 50) / 10
+        p_ast_mapped  = playmaking / 3.5
+        p_orb_mapped  = (rebounding / 100) * 12
+        p_drb_mapped  = (rebounding / 100) * 20
+        p_blk_mapped  = (defense / 100) * 8
+        p_stl_mapped  = (defense / 100) * 3.5
+
+        # Fingerprint scores
+        scores = {
+            "ts":   nd(p_ts_mapped, h_ts, 8),
+            "efg":  nd(p_efg_mapped, h_efg, 8),
+            "usg":  nd(p_usg, h_usg, 6),
+            "p3":   nd(p_p3, h_p3, 12),
+            "ast":  nd(p_ast_mapped, h_ast, 7),
+            "orb":  nd(p_orb_mapped, h_orb, 4),
+            "drb":  nd(p_drb_mapped, h_drb, 6),
+            "blk":  nd(p_blk_mapped, h_blk, 3),
+            "stl":  nd(p_stl_mapped, h_stl, 1.5),
+            "dbpm": nd(p_dbpm_mapped, h_dbpm, 2),
+            "bpm":  nd(h_bpm, 0, 5),
+            "ht":   nd(p_h, h_h, 2),
+        }
+
+        # Base weights
+        w = {"ts":0.10,"efg":0.08,"usg":0.10,"p3":0.06,"ast":0.09,"orb":0.07,"drb":0.07,"blk":0.07,"stl":0.06,"dbpm":0.08,"bpm":0.06,"ht":0.16}
+
+        # Dominant skill boost: double the relevant weights
+        skills = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
+        dominant = max(skills, key=skills.get)
+        dom_val  = skills[dominant]
+
+        if dom_val >= 75:
+            if dominant == "shooting":
+                w["ts"] = 0.18; w["efg"] = 0.14; w["p3"] = 0.12
+                w["ast"] = 0.05; w["orb"] = 0.03; w["drb"] = 0.04; w["blk"] = 0.03; w["stl"] = 0.03
+                w["usg"] = 0.08; w["dbpm"] = 0.04; w["bpm"] = 0.04; w["ht"] = 0.22
+            elif dominant == "rebounding":
+                w["orb"] = 0.14; w["drb"] = 0.14; w["blk"] = 0.08
+                w["ts"] = 0.06; w["efg"] = 0.04; w["p3"] = 0.02
+                w["ast"] = 0.04; w["usg"] = 0.07; w["dbpm"] = 0.06; w["stl"] = 0.04; w["bpm"] = 0.05; w["ht"] = 0.26
+            elif dominant == "defense":
+                w["dbpm"] = 0.16; w["blk"] = 0.13; w["stl"] = 0.11
+                w["ts"] = 0.05; w["efg"] = 0.04; w["p3"] = 0.02
+                w["ast"] = 0.05; w["orb"] = 0.05; w["drb"] = 0.06; w["usg"] = 0.06; w["bpm"] = 0.05; w["ht"] = 0.22
+            elif dominant == "playmaking":
+                w["ast"] = 0.20; w["usg"] = 0.12; w["bpm"] = 0.08
+                w["ts"] = 0.07; w["efg"] = 0.05; w["p3"] = 0.04
+                w["orb"] = 0.03; w["drb"] = 0.04; w["blk"] = 0.03; w["stl"] = 0.06; w["dbpm"] = 0.06; w["ht"] = 0.22
+
+        return sum(scores[k] * w[k] for k in scores)
+    except:
+        return 0.0
 
 
 with tab5:
     st.subheader("Player Card / Ranking System")
-    st.caption("HoopsHub Scout grade cards and historical transition comps.")
+    st.caption("HoopsHub Scout grade cards with live historical comp matching from BartTorvik.")
 
-    players_to_show = PORTAL_PLAYERS
-
-    tier_options = sorted(list(set(p["tier"] for p in players_to_show)))
+    tier_options = sorted(list(set(p["tier"] for p in PORTAL_PLAYERS)))
     tier_filter = st.multiselect("Filter by Tier:", tier_options, default=tier_options)
     if not tier_filter:
         tier_filter = tier_options
 
     show_writeups = st.checkbox("Show scouting writeups", value=False)
 
-    filtered_players = [p for p in players_to_show if p["tier"] in tier_filter]
-
-    # deduplicate by name
+    filtered_players = [p for p in PORTAL_PLAYERS if p["tier"] in tier_filter]
     seen = set()
     unique_players = []
     for p in filtered_players:
@@ -1271,109 +1095,63 @@ with tab5:
     st.write(f"**{len(unique_players)} players** in view")
     st.write("---")
 
-    # 2-column card grid
     cols = st.columns(2)
-    for i, p in enumerate(unique_players):
+    for i, player in enumerate(unique_players):
         with cols[i % 2]:
-            st.markdown(player_card_html(p, show_writeup=show_writeups), unsafe_allow_html=True)
+            st.markdown(render_card_html(player, show_writeup=show_writeups), unsafe_allow_html=True)
 
-            # Comp finder expander
-            if p.get("ts"):
-                with st.expander(f"Find Historical Comps: {p['name']}"):
-                    st.caption("Pulling from BartTorvik historical database (2018-2024)...")
-                    all_hist = []
-                    for yr in [2024, 2023, 2022, 2021, 2020, 2019, 2018]:
-                        yr_data = fetch_torvik_year(yr)
-                        if yr_data:
-                            all_hist.extend(yr_data)
-
-                    if not all_hist:
-                        st.warning("Could not load historical data from BartTorvik.")
+            if player.get("ts"):
+                with st.expander(f"Find Historical Comps: {player['name']}"):
+                    if df_all is None or df_all.empty:
+                        st.warning("BartTorvik data unavailable.")
                     else:
-                        player_conf_tier = conf_tier(p.get("school", ""))
-                        pool = [
-                            h for h in all_hist
-                            if h["min_pct"] >= 20
-                            and h["usg"] >= 10
-                            and abs(conf_tier(h["conf"]) - player_conf_tier) <= 1
-                        ]
+                        scored_comps = []
+                        p_h = parse_height_inches(player.get("height", "6'6\""))
 
-                        scored = []
-                        for h in pool:
-                            s = score_historical_comp(p, h)
+                        for _, hist_row in df_all.iterrows():
+                            s = score_comp(player, hist_row)
                             if s > 0.0:
-                                scored.append((s, h))
-                        scored.sort(key=lambda x: x[0], reverse=True)
-                        top_comps = scored[:6]
+                                scored_comps.append((s, hist_row))
 
-                        # debug: show sample heights from BartTorvik to verify parsing
-                        sample_heights = list(set([h["height"] for h in pool[:50] if h["height"]]))[:8]
-                        player_h_in = height_inches(p.get("height", "6'6\""))
-                        st.caption(f"Sample heights from DB: {sample_heights}")
-                        st.caption(f"Player height: {p.get('height','')} = {player_h_in} inches")
-                        st.write(f"**Top statistical comps from {len(pool):,} historical seasons ({len(scored)} passed height+pos+conf filters):**")
-                        for score, c in top_comps:
-                            pct = int(score * 100)
-                            html = (
-                                "<div style=\"background:#ffffff !important;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
-                                "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
-                                "<div>"
-                                "<div style=\"font-size:14px;font-weight:700;color:#111827 !important;\">" + c["name"] + "</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#6b7280 !important;margin-top:2px;\">"
-                                + c["height"] + " &nbsp;&middot;&nbsp; " + c["team"] + " (" + c["conf"] + ") &nbsp;&middot;&nbsp; " + str(c["year"]) +
-                                "</div>"
-                                "</div>"
-                                "<span style=\"font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE !important;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
-                                "</div>"
-                                "<div style=\"display:flex;background:#f9fafb !important;border:1px solid #dde2ee;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
-                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["ts"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">TS%</div>"
-                                "</div>"
-                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["usg"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">USG%</div>"
-                                "</div>"
-                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["p3"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">3P%</div>"
-                                "</div>"
-                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["bpm"], 1)) + "</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">BPM</div>"
-                                "</div>"
-                                "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["ast"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">AST%</div>"
-                                "</div>"
-                                "</div>"
-                                "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
-                                "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
-                                "</div>"
-                                "</div>"
-                            )
-                            st.markdown(html, unsafe_allow_html=True)# ... EVERYTHING YOU ALREADY HAVE IN TAB 1 & TAB 2 ABOVE ...
+                        scored_comps.sort(key=lambda x: x[0], reverse=True)
+                        top_matches = scored_comps[:6]
 
-    # THIS IS THE LAST PART OF YOUR OLD CODE:
-    ordered_cols = ["PLAYER", "TEAM", "CONF", "MIN_P", "BPM", "PRPG", "USG", 
-                    "EFG", "TS", "OR", "DR", "AST", "TO", "BLK", "STL", "FTR", "TWO_P", "THREE_P", "THREE_P_100"]
+                        st.write(f"**Top comps from {len(df_all):,} current-season players ({len(scored_comps)} passed height filter):**")
 
-    # Render filtered dataframe
-    st.dataframe(filtered_df[ordered_cols], hide_index=True, use_container_width=True)
+                        if not top_matches:
+                            st.info("No close height matches found in the current season database.")
+                        else:
+                            for match_score, match_data in top_matches:
+                                pct = round(match_score * 100, 1)
+                                name = match_data.get("PLAYER", "")
+                                team = match_data.get("TEAM", "")
+                                conf = match_data.get("CONF", "")
+                                ht   = match_data.get("HEIGHT", "")
+                                bpm  = match_data.get("BPM", 0)
+                                usg  = match_data.get("USG", 0)
+                                efg  = match_data.get("EFG", 0)
+                                ts_v = match_data.get("TS", 0)
+                                ts_v = ts_v * 100 if float(ts_v or 0) <= 1.0 else ts_v
+                                ast  = match_data.get("AST", 0)
 
-    # PASTE THE REST OF THE CODE DIRECTLY BELOW THIS LINE 👇
-    # Quick Jump Selector
-    st.write("")
-    portal_select = st.selectbox("Quick-jump to player's scouting evaluation profile:", 
-                                 [""] + list(filtered_df["PLAYER"]), index=0)
-    if portal_select:
-        st.session_state.active_player = portal_select
-        st.rerun()
-
-
-# ==========================================
-# TAB 3: FRONT OFFICE TARGET BOARD
-# ==========================================
-with tab3:
-    st.subheader("Front Office Recruitment Hierarchy")
-# ... and so on until the end of Tab 5
+                                html = (
+                                    "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
+                                    "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
+                                    "<div>"
+                                    f"<div style=\"font-size:14px;font-weight:700;color:#111827;\">{name}</div>"
+                                    f"<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#6b7280;margin-top:2px;\">{ht} &middot; {team} ({conf})</div>"
+                                    "</div>"
+                                    f"<span style=\"font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">{pct}% match</span>"
+                                    "</div>"
+                                    "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(ts_v):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">TS%</div></div>"
+                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(usg):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">USG%</div></div>"
+                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(efg):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">eFG%</div></div>"
+                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(bpm):.1f}</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">BPM</div></div>"
+                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(ast):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div></div>"
+                                    "</div>"
+                                    f"<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\"><div style=\"height:100%;width:{pct}%;background:#2774AE;border-radius:2px;\"></div></div>"
+                                    "</div>"
+                                )
+                                st.markdown(html, unsafe_allow_html=True)
+                                
