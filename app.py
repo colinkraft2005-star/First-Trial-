@@ -920,8 +920,8 @@ def fetch_torvik_year(year):
                 "team": str(row[1]),
                 "conf": str(row[2]),
                 "year": year,
-                "cls": str(row[25]) if len(row) > 25 else "",
-                "height": str(row[26]) if len(row) > 26 else "",
+                "cls": str(row[22]) if len(row) > 22 else "",
+                "height": str(row[23]) if len(row) > 23 else "",
                 "ts": sf(8),
                 "usg": sf(6),
                 "p3": sf(21) * 100,
@@ -958,7 +958,15 @@ def height_inches(h):
             feet = int(parts[0].strip())
             inches = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 0
             return feet * 12 + inches
-        return int(h)
+        if "-" in h:
+            parts = h.split("-")
+            feet = int(parts[0].strip())
+            inches = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 0
+            return feet * 12 + inches
+        val = int(h)
+        # if it's already in inches (e.g. 84), return as-is
+        # if it looks like feet (e.g. 6 or 7), multiply
+        return val if val > 10 else val * 12
     except:
         return 76
 
