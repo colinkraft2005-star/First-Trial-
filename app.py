@@ -950,21 +950,108 @@ def conf_tier(conf):
     return 4
 
 
+def height_inches(h):
+    try:
+        h = str(h).replace('"', '').strip()
+        if "'" in h:
+            parts = h.split("'")
+            feet = int(parts[0].strip())
+            inches = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else 0
+            return feet * 12 + inches
+        return int(h)
+    except:
+        return 76
+
+
+def pos_group(pos):
+    p = (pos or "").lower()
+    if any(x in p for x in ["pg", "point"]):
+        return 0
+    if any(x in p for x in ["sg", "combo", "cg", "g/"]):
+        return 1
+    if any(x in p for x in ["wing", "sf", "g/w", "w/"]):
+        return 2
+    if any(x in p for x in ["pf", "forward", "f/"]):
+        return 3
+    if any(x in p for x in ["c", "center", "/c"]):
+        return 4
+    return 2
+
+
 def score_historical_comp(player, hist):
     def nd2(a, b, r):
         try:
             return max(0.0, 1.0 - abs(float(a) - float(b)) / r)
         except:
             return 0.0
-    s = 0.0
-    s += nd2(player.get("ts", 0), hist["ts"], 15) * 0.25
-    s += nd2(player.get("usg", 0), hist["usg"], 12) * 0.20
-    s += nd2(player.get("p3", 0), hist["p3"], 15) * 0.15
-    s += nd2(conf_tier(player.get("school", "")), conf_tier(hist["conf"]), 2) * 0.15
-    s += nd2(player.get("defense", 50), hist["dbpm"] * 10 + 50, 20) * 0.10
-    s += nd2(player.get("playmaking", 50), hist["ast"] * 2, 20) * 0.10
-    s += nd2(player.get("rebounding", 50), (hist["orb"] + hist["drb"]) * 2, 20) * 0.05
-    return s
+
+    # --- FOUNDATION: always fixed ---
+    player_h = height_inches(player.get("height", "6'6\""))
+    hist_h = height_inches(hist.get("height", "6'6\""))
+    height_score = nd2(player_h, hist_h, 3)
+
+    player_pos = pos_group(player.get("pos", "wing"))
+    if hist_h <= 74:
+        hist_pos = 0 if hist["ast"] > 25 else 1
+    elif hist_h <= 77:
+        hist_pos = 2
+    elif hist_h <= 80:
+        hist_pos = 3
+    else:
+        hist_pos = 4
+    pos_score = nd2(player_pos, hist_pos, 1.5)
+
+    # --- CORE METRICS ---
+    usg_score  = nd2(float(player.get("usg", 18) or 18), hist["usg"], 8)
+    ts_score   = nd2(float(player.get("ts", 58) or 58), hist["ts"], 10)
+    p3_score   = nd2(float(player.get("p3", 30) or 0), hist["p3"], 12)
+    bpm_score  = nd2((float(player.get("shooting", 70)) - 50) / 10, hist["bpm"], 3)
+    def_score  = nd2((float(player.get("defense", 60)) - 50) / 10, hist["dbpm"], 2)
+    ast_score  = nd2(float(player.get("playmaking", 60)) / 3, hist["ast"], 8)
+    reb_score  = nd2(float(player.get("rebounding", 60)) / 10, hist["orb"] + hist["drb"], 4)
+    conf_score = nd2(conf_tier(player.get("school", "")), conf_tier(hist["conf"]), 2)
+
+    # --- DYNAMIC PROFILE DETECTION ---
+    shooting   = float(player.get("shooting", 60))
+    defense    = float(player.get("defense", 60))
+    playmaking = float(player.get("playmaking", 60))
+    rebounding = float(player.get("rebounding", 60))
+    skills     = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
+    dominant   = max(skills, key=skills.get)
+    dom_val    = skills[dominant]
+
+    # only shift weights if there's a clear dominant skill (>=75)
+    if dom_val >= 75:
+        if dominant == "shooting":
+            # shooter: heavily weight TS%, 3P%, USG (role spacer vs creator)
+            w = dict(height=0.16, pos=0.14, usg=0.10, ts=0.18, p3=0.18, bpm=0.08, defense=0.06, ast=0.05, reb=0.03, conf=0.02)
+        elif dominant == "rebounding":
+            # rebounder: heavily weight reb rate, size, position
+            w = dict(height=0.22, pos=0.18, usg=0.10, ts=0.06, p3=0.02, bpm=0.08, defense=0.08, ast=0.04, reb=0.18, conf=0.04)
+        elif dominant == "defense":
+            # defender: weight DBPM, position versatility, size
+            w = dict(height=0.20, pos=0.18, usg=0.08, ts=0.06, p3=0.03, bpm=0.06, defense=0.20, ast=0.07, reb=0.08, conf=0.04)
+        elif dominant == "playmaking":
+            # playmaker: weight AST%, USG, BPM
+            w = dict(height=0.16, pos=0.16, usg=0.14, ts=0.08, p3=0.04, bpm=0.12, defense=0.05, ast=0.18, reb=0.04, conf=0.03)
+        else:
+            w = dict(height=0.20, pos=0.18, usg=0.14, ts=0.08, p3=0.05, bpm=0.10, defense=0.10, ast=0.08, reb=0.04, conf=0.03)
+    else:
+        # balanced player: use base weights
+        w = dict(height=0.20, pos=0.18, usg=0.14, ts=0.08, p3=0.05, bpm=0.10, defense=0.10, ast=0.08, reb=0.04, conf=0.03)
+
+    return (
+        height_score * w["height"] +
+        pos_score    * w["pos"]    +
+        usg_score    * w["usg"]    +
+        ts_score     * w["ts"]     +
+        p3_score     * w["p3"]     +
+        bpm_score    * w["bpm"]    +
+        def_score    * w["defense"]+
+        ast_score    * w["ast"]    +
+        reb_score    * w["reb"]    +
+        conf_score   * w["conf"]
+    )
 
 
 def skill_bar_html(label, value):
@@ -1137,39 +1224,39 @@ with tab5:
                         for score, c in top_comps:
                             pct = int(score * 100)
                             html = (
-                                "<div style=\"background:#fff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
+                                "<div style=\"background:#ffffff !important;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
                                 "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
                                 "<div>"
-                                "<div style=\"font-size:14px;font-weight:700;\">" + c["name"] + "</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#8e97b8;margin-top:2px;\">"
+                                "<div style=\"font-size:14px;font-weight:700;color:#111827 !important;\">" + c["name"] + "</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#6b7280 !important;margin-top:2px;\">"
                                 + c["height"] + " &nbsp;&middot;&nbsp; " + c["team"] + " (" + c["conf"] + ") &nbsp;&middot;&nbsp; " + str(c["year"]) +
                                 "</div>"
                                 "</div>"
-                                "<span style=\"font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
+                                "<span style=\"font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE !important;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
                                 "</div>"
-                                "<div style=\"display:flex;background:#f5f7fb;border:1px solid #dde2ee;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                                "<div style=\"display:flex;background:#f9fafb !important;border:1px solid #dde2ee;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
                                 "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["ts"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">TS%</div>"
-                                "</div>"
-                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["usg"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">USG%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["ts"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">TS%</div>"
                                 "</div>"
                                 "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["p3"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">3P%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["usg"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">USG%</div>"
                                 "</div>"
                                 "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["bpm"], 1)) + "</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">BPM</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["p3"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">3P%</div>"
+                                "</div>"
+                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["bpm"], 1)) + "</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">BPM</div>"
                                 "</div>"
                                 "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["ast"], 1)) + "%</div>"
-                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">AST%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827 !important;\">" + str(round(c["ast"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280 !important;text-transform:uppercase;\">AST%</div>"
                                 "</div>"
                                 "</div>"
-                                "<div style=\"height:3px;background:#edf0f7;border-radius:2px;\">"
+                                "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
                                 "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
                                 "</div>"
                                 "</div>"
