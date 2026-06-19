@@ -993,20 +993,27 @@ def pos_group(pos):
 
 
 def score_historical_comp(player, hist):
+    """
+    Torvik-style statistical fingerprint matching.
+    - Normalize all rates to per-possession (already are in BartTorvik)
+    - Build a fingerprint vector across all key production dimensions
+    - Hard filter on height (+/-3in), position (1 bucket), conf (1 tier)
+    - Dominant skill gets 2x weight in the fingerprint
+    """
     def nd2(a, b, r):
         try:
             return max(0.0, 1.0 - abs(float(a) - float(b)) / r)
         except:
             return 0.0
 
-    # === PILLAR 1: HEIGHT - hard cutoff 3 inches, 25% weight ===
+    # === HARD FILTERS: eliminate bad matches before scoring ===
+    # Height
     player_h = height_inches(player.get("height", "6'6\""))
     hist_h = hist.get("height_in", 78)
     if abs(player_h - hist_h) > 3:
         return 0.0
-    height_score = nd2(player_h, hist_h, 2)
 
-    # === PILLAR 2: ROLE/POSITION - hard cutoff 1 bucket, 25% weight ===
+    # Position
     player_pos = pos_group(player.get("pos", "wing"))
     h_ast = hist["ast"]
     h_blk = hist["blk"]
@@ -1023,45 +1030,109 @@ def score_historical_comp(player, hist):
         hist_pos = 3
     if abs(player_pos - hist_pos) > 1:
         return 0.0
-    pos_score = nd2(player_pos, hist_pos, 1.0)
 
-    # === PILLAR 3: CONFERENCE - hard cutoff 1 tier, 20% weight ===
+    # Conference tier
     player_conf = conf_tier(player.get("school", ""))
     hist_conf = conf_tier(hist["conf"])
     if abs(player_conf - hist_conf) > 1:
         return 0.0
-    conf_score = nd2(player_conf, hist_conf, 1.0)
 
-    # === SECONDARY STATS - 30% total, dynamic by dominant skill ===
-    usg_score = nd2(float(player.get("usg", 18) or 18), hist["usg"], 8)
-    ts_score  = nd2(float(player.get("ts", 58) or 58), hist["ts"], 10)
-    p3_score  = nd2(float(player.get("p3", 0) or 0), hist["p3"], 12)
-    def_score = nd2((float(player.get("defense", 60)) - 50) / 10, hist["dbpm"], 2)
-    ast_score = nd2(float(player.get("playmaking", 60)) / 3, hist["ast"], 8)
-    reb_score = nd2(float(player.get("rebounding", 60)) / 10, hist["orb"] + hist["drb"], 4)
+    # === TORVIK-STYLE FINGERPRINT ===
+    # All stats already per-possession normalized from BartTorvik
+    # Map player card skill ratings to comparable stat dimensions
 
+    # Shooting fingerprint: TS%, 3P rate, eFG proxy
+    shoot_rating = float(player.get("shooting", 60))
+    # TS% comparison: player card shooting 60=avg(55% TS), 80=elite(65% TS)
+    player_ts = 45 + (shoot_rating / 100) * 25  # maps 0-100 -> 45-70% TS
+    ts_comp = nd2(player_ts, hist["ts"], 8)
+    p3_comp = nd2(float(player.get("p3", 0) or 0), hist["p3"], 10)
+
+    # Usage/role fingerprint
+    player_usg = float(player.get("usg", 18) or 18)
+    usg_comp = nd2(player_usg, hist["usg"], 6)
+
+    # Playmaking fingerprint: AST%
+    play_rating = float(player.get("playmaking", 60))
+    player_ast = play_rating / 3.5  # maps 0-100 -> 0-28% AST
+    ast_comp = nd2(player_ast, hist["ast"], 7)
+
+    # Rebounding fingerprint: ORB% + DRB%
+    reb_rating = float(player.get("rebounding", 60))
+    player_orb = (reb_rating / 100) * 12
+    player_drb = (reb_rating / 100) * 20
+    orb_comp = nd2(player_orb, hist["orb"], 4)
+    drb_comp = nd2(player_drb, hist["drb"], 6)
+
+    # Defensive fingerprint: BLK%, STL%, DBPM
+    def_rating = float(player.get("defense", 60))
+    player_dbpm = (def_rating - 50) / 10
+    player_blk = (def_rating / 100) * 8
+    player_stl = (def_rating / 100) * 3.5
+    blk_comp = nd2(player_blk, hist["blk"], 3)
+    stl_comp = nd2(player_stl, hist["stl"], 1.5)
+    dbpm_comp = nd2(player_dbpm, hist["dbpm"], 2)
+
+    # === DOMINANT SKILL DETECTION ===
     shooting   = float(player.get("shooting", 60))
     defense    = float(player.get("defense", 60))
     playmaking = float(player.get("playmaking", 60))
     rebounding = float(player.get("rebounding", 60))
     skills = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
     dominant = max(skills, key=skills.get)
-    dom_val  = skills[dominant]
+    dom_val = skills[dominant]
 
+    # Base fingerprint weights (Torvik-style, all dimensions matter)
+    w = {
+        "ts":   0.12,
+        "p3":   0.08,
+        "usg":  0.10,
+        "ast":  0.10,
+        "orb":  0.08,
+        "drb":  0.07,
+        "blk":  0.08,
+        "stl":  0.07,
+        "dbpm": 0.08,
+        "height": 0.12,
+        "pos":  0.10,
+    }
+
+    # Boost dominant skill dimensions by 2x, redistribute from weaker ones
     if dom_val >= 75:
         if dominant == "shooting":
-            sec = ts_score * 0.14 + p3_score * 0.10 + usg_score * 0.04 + def_score * 0.01 + ast_score * 0.01 + reb_score * 0.00
+            w["ts"] = 0.20; w["p3"] = 0.14; w["usg"] = 0.10
+            w["ast"] = 0.06; w["orb"] = 0.04; w["drb"] = 0.04
+            w["blk"] = 0.04; w["stl"] = 0.04; w["dbpm"] = 0.04
+            w["height"] = 0.16; w["pos"] = 0.14
         elif dominant == "rebounding":
-            sec = reb_score * 0.14 + usg_score * 0.06 + ts_score * 0.04 + def_score * 0.04 + ast_score * 0.01 + p3_score * 0.01
+            w["ts"] = 0.06; w["p3"] = 0.03; w["usg"] = 0.08
+            w["ast"] = 0.05; w["orb"] = 0.16; w["drb"] = 0.14
+            w["blk"] = 0.08; w["stl"] = 0.04; w["dbpm"] = 0.06
+            w["height"] = 0.16; w["pos"] = 0.14
         elif dominant == "defense":
-            sec = def_score * 0.14 + reb_score * 0.06 + usg_score * 0.04 + ts_score * 0.03 + ast_score * 0.02 + p3_score * 0.01
-        else:
-            sec = ast_score * 0.12 + usg_score * 0.08 + ts_score * 0.04 + def_score * 0.03 + reb_score * 0.02 + p3_score * 0.01
-    else:
-        sec = usg_score * 0.08 + ts_score * 0.08 + p3_score * 0.05 + def_score * 0.05 + ast_score * 0.04 + reb_score * 0.00
+            w["ts"] = 0.06; w["p3"] = 0.03; w["usg"] = 0.07
+            w["ast"] = 0.05; w["orb"] = 0.06; w["drb"] = 0.06
+            w["blk"] = 0.14; w["stl"] = 0.12; w["dbpm"] = 0.15
+            w["height"] = 0.12; w["pos"] = 0.14
+        elif dominant == "playmaking":
+            w["ts"] = 0.08; w["p3"] = 0.05; w["usg"] = 0.10
+            w["ast"] = 0.22; w["orb"] = 0.04; w["drb"] = 0.04
+            w["blk"] = 0.03; w["stl"] = 0.06; w["dbpm"] = 0.04
+            w["height"] = 0.16; w["pos"] = 0.18
 
-    return height_score * 0.25 + pos_score * 0.25 + conf_score * 0.20 + sec
-
+    return (
+        ts_comp   * w["ts"]   +
+        p3_comp   * w["p3"]   +
+        usg_comp  * w["usg"]  +
+        ast_comp  * w["ast"]  +
+        orb_comp  * w["orb"]  +
+        drb_comp  * w["drb"]  +
+        blk_comp  * w["blk"]  +
+        stl_comp  * w["stl"]  +
+        dbpm_comp * w["dbpm"] +
+        nd2(player_h, hist_h, 2)               * w["height"] +
+        nd2(player_pos, hist_pos, 1.0)          * w["pos"]
+    )
 
 
 def skill_bar_html(label, value):
@@ -1276,4 +1347,3 @@ with tab5:
                                 "</div>"
                             )
                             st.markdown(html, unsafe_allow_html=True)
-                            
