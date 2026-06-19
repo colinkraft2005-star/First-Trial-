@@ -913,65 +913,87 @@ def render_card_html(player, show_writeup=False):
     df_c = get_bar_color(player["defense"])
     pl_c = get_bar_color(player["playmaking"])
     rb_c = get_bar_color(player["rebounding"])
+
     tags_html = "".join([
         "<span style=\"background:#e8f1f9;color:#2774AE;font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:3px 9px;border-radius:3px;border:1px solid #b8d3ec;margin:2px;display:inline-block;text-transform:uppercase;letter-spacing:.04em;\">" + t + "</span>"
         for t in player.get("tags", [])
     ])
+
     writeup_html = ""
     if show_writeup and player.get("writeup"):
-        writeup_html = f'<div style="padding:10px 14px;border-top:1px solid #e5e7eb;font-size:12px;line-height:1.65;color:#374151;">{player["writeup"]}</div>'
+        writeup_html = "<div style=\"padding:10px 14px;border-top:1px solid #e5e7eb;font-size:12px;line-height:1.65;color:#374151;\">" + player["writeup"] + "</div>"
 
-    ts = player.get("ts", "")
-    usg = player.get("usg", "")
-    p3 = player.get("p3", "0")
+    ts  = str(player.get("ts", ""))
+    usg = str(player.get("usg", ""))
+    p3  = str(player.get("p3", "0"))
+
     stats_html = ""
     if ts:
-        stats_html = f'''
-        <div style="display:flex;border-bottom:1px solid #e5e7eb;background:#fff;">
-            <div style="flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;">
-                <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500;color:#111827;">{ts}%</span>
-                <span style="display:block;font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;margin-top:2px;">TS%</span>
-            </div>
-            <div style="flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;">
-                <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500;color:#111827;">{usg}%</span>
-                <span style="display:block;font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;margin-top:2px;">USG%</span>
-            </div>
-            <div style="flex:1;padding:9px 0;text-align:center;">
-                <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:500;color:#111827;">{p3}%</span>
-                <span style="display:block;font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;margin-top:2px;">3P%</span>
-            </div>
-        </div>'''
+        stats_html = (
+            "<div style=\"display:flex;border-bottom:1px solid #e5e7eb;background:#fff;\">"
+            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+            "<span style=\"font-size:13px;font-weight:500;color:#111827;display:block;\">" + ts + "%</span>"
+            "<span style=\"font-size:7px;color:#6b7280;text-transform:uppercase;display:block;margin-top:2px;\">TS%</span>"
+            "</div>"
+            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+            "<span style=\"font-size:13px;font-weight:500;color:#111827;display:block;\">" + usg + "%</span>"
+            "<span style=\"font-size:7px;color:#6b7280;text-transform:uppercase;display:block;margin-top:2px;\">USG%</span>"
+            "</div>"
+            "<div style=\"flex:1;padding:9px 0;text-align:center;\">"
+            "<span style=\"font-size:13px;font-weight:500;color:#111827;display:block;\">" + p3 + "%</span>"
+            "<span style=\"font-size:7px;color:#6b7280;text-transform:uppercase;display:block;margin-top:2px;\">3P%</span>"
+            "</div>"
+            "</div>"
+        )
 
     def bar(label, val, color):
-        return f'''<div style="margin-bottom:6px;">
-            <div style="display:flex;justify-content:space-between;font-family:'DM Mono',monospace;font-size:9px;text-transform:uppercase;color:#374151;margin-bottom:2px;"><span>{label}</span><span style="color:{color};font-weight:600;">{val}</span></div>
-            <div style="background:#e5e7eb;border-radius:2px;height:5px;overflow:hidden;"><div style="height:100%;width:{val}%;background:{color};border-radius:2px;"></div></div>
-        </div>'''
+        return (
+            "<div style=\"margin-bottom:6px;\">"
+            "<div style=\"display:flex;justify-content:space-between;font-size:9px;text-transform:uppercase;color:#374151;margin-bottom:2px;\">"
+            "<span>" + label + "</span>"
+            "<span style=\"color:" + color + ";font-weight:600;\">" + str(val) + "</span>"
+            "</div>"
+            "<div style=\"background:#e5e7eb;border-radius:2px;height:5px;overflow:hidden;\">"
+            "<div style=\"height:100%;width:" + str(val) + "%;background:" + color + ";border-radius:2px;\"></div>"
+            "</div>"
+            "</div>"
+        )
 
-    return f'''<div style="background:#ffffff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:14px;">
-        <div style="padding:14px 16px 10px;border-bottom:1px solid #e5e7eb;">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-                <div>
-                    <div style="font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;color:#111827;letter-spacing:.02em;">{player["name"]}</div>
-                    <div style="font-family:'DM Mono',monospace;font-size:10px;color:#6b7280;margin-top:3px;">{player.get("height","")} &middot; {player.get("pos","")} &middot; {player.get("cls","")} &middot; {player.get("school","")}</div>
-                </div>
-                <span style="font-family:'DM Mono',monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;font-weight:600;">{player.get("tier","")}</span>
-            </div>
-        </div>
-        {stats_html}
-        <div style="padding:12px 16px 6px;">
-            {bar("Shooting", player["shooting"], sh_c)}
-            {bar("Defense", player["defense"], df_c)}
-            {bar("Playmaking", player["playmaking"], pl_c)}
-            {bar("Rebounding", player["rebounding"], rb_c)}
-        </div>
-        <div style="padding:0 16px 10px;">{tags_html}</div>
-        <div style="padding:10px 16px;border-top:1px solid #e5e7eb;background:#f9fafb;">
-            <div style="font-size:12px;font-weight:700;color:#111827;">{player.get("projection","")}</div>
-            <div style="font-family:'DM Mono',monospace;font-size:9px;color:#2774AE;margin-top:2px;">{player.get("role","")}</div>
-        </div>
-        {writeup_html}
-    </div>'''
+    name       = player.get("name", "")
+    height     = player.get("height", "")
+    pos        = player.get("pos", "")
+    cls        = player.get("cls", "")
+    school     = player.get("school", "")
+    tier       = player.get("tier", "")
+    projection = player.get("projection", "")
+    role       = player.get("role", "")
+
+    return (
+        "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:14px;\">"
+        "<div style=\"padding:14px 16px 10px;border-bottom:1px solid #e5e7eb;\">"
+        "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;\">"
+        "<div>"
+        "<div style=\"font-size:20px;font-weight:800;color:#111827;letter-spacing:.02em;\">" + name + "</div>"
+        "<div style=\"font-size:10px;color:#6b7280;margin-top:3px;\">" + height + " &middot; " + pos + " &middot; " + cls + " &middot; " + school + "</div>"
+        "</div>"
+        "<span style=\"font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;font-weight:600;\">" + tier + "</span>"
+        "</div>"
+        "</div>"
+        + stats_html +
+        "<div style=\"padding:12px 16px 6px;\">"
+        + bar("Shooting", player["shooting"], sh_c)
+        + bar("Defense", player["defense"], df_c)
+        + bar("Playmaking", player["playmaking"], pl_c)
+        + bar("Rebounding", player["rebounding"], rb_c) +
+        "</div>"
+        "<div style=\"padding:0 16px 10px;\">" + tags_html + "</div>"
+        "<div style=\"padding:10px 16px;border-top:1px solid #e5e7eb;background:#f9fafb;\">"
+        "<div style=\"font-size:12px;font-weight:700;color:#111827;\">" + projection + "</div>"
+        "<div style=\"font-size:9px;color:#2774AE;margin-top:2px;\">" + role + "</div>"
+        "</div>"
+        + writeup_html +
+        "</div>"
+    )
 
 
 def score_comp(player, hist_row):
@@ -1106,8 +1128,6 @@ with tab5:
                         st.warning("BartTorvik data unavailable.")
                     else:
                         scored_comps = []
-                        p_h = parse_height_inches(player.get("height", "6'6\""))
-
                         for _, hist_row in df_all.iterrows():
                             s = score_comp(player, hist_row)
                             if s > 0.0:
@@ -1123,35 +1143,51 @@ with tab5:
                         else:
                             for match_score, match_data in top_matches:
                                 pct = round(match_score * 100, 1)
-                                name = match_data.get("PLAYER", "")
-                                team = match_data.get("TEAM", "")
-                                conf = match_data.get("CONF", "")
-                                ht   = match_data.get("HEIGHT", "")
-                                bpm  = match_data.get("BPM", 0)
-                                usg  = match_data.get("USG", 0)
-                                efg  = match_data.get("EFG", 0)
-                                ts_v = match_data.get("TS", 0)
-                                ts_v = ts_v * 100 if float(ts_v or 0) <= 1.0 else ts_v
-                                ast  = match_data.get("AST", 0)
+                                c_name = str(match_data.get("PLAYER", ""))
+                                c_team = str(match_data.get("TEAM", ""))
+                                c_conf = str(match_data.get("CONF", ""))
+                                c_ht   = str(match_data.get("HEIGHT", ""))
+                                c_bpm  = float(match_data.get("BPM", 0))
+                                c_usg  = float(match_data.get("USG", 0))
+                                c_efg  = float(match_data.get("EFG", 0))
+                                c_ts   = float(match_data.get("TS", 0))
+                                c_ts   = c_ts * 100 if c_ts <= 1.0 else c_ts
+                                c_ast  = float(match_data.get("AST", 0))
 
                                 html = (
                                     "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
                                     "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
                                     "<div>"
-                                    f"<div style=\"font-size:14px;font-weight:700;color:#111827;\">{name}</div>"
-                                    f"<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#6b7280;margin-top:2px;\">{ht} &middot; {team} ({conf})</div>"
+                                    "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
+                                    "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht + " &middot; " + c_team + " (" + c_conf + ")</div>"
                                     "</div>"
-                                    f"<span style=\"font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">{pct}% match</span>"
+                                    "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
                                     "</div>"
                                     "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
-                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(ts_v):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">TS%</div></div>"
-                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(usg):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">USG%</div></div>"
-                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(efg):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">eFG%</div></div>"
-                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(bpm):.1f}</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">BPM</div></div>"
-                                    f"<div style=\"flex:1;padding:6px 0;text-align:center;\"><div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;color:#111827;\">{float(ast):.1f}%</div><div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div></div>"
+                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ts:.1f}%" + "</div>"
+                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">TS%</div>"
                                     "</div>"
-                                    f"<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\"><div style=\"height:100%;width:{pct}%;background:#2774AE;border-radius:2px;\"></div></div>"
+                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_usg:.1f}%" + "</div>"
+                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">USG%</div>"
+                                    "</div>"
+                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_efg:.1f}%" + "</div>"
+                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">eFG%</div>"
+                                    "</div>"
+                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_bpm:.1f}" + "</div>"
+                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">BPM</div>"
+                                    "</div>"
+                                    "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
+                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ast:.1f}%" + "</div>"
+                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div>"
+                                    "</div>"
+                                    "</div>"
+                                    "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
+                                    "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
+                                    "</div>"
                                     "</div>"
                                 )
                                 st.markdown(html, unsafe_allow_html=True)
-                                
