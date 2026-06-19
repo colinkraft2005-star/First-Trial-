@@ -979,11 +979,11 @@ def skill_bar_html(label, value):
         text_color = "#dc2626"
     return (
         "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:5px;\">"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#4b5577;width:82px;flex-shrink:0;\">" + label + "</div>"
-        "<div style=\"flex:1;height:5px;background:#edf0f7;border-radius:2px;overflow:hidden;border:1px solid #dde2ee;\">"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#374151 !important;width:82px;flex-shrink:0;\">" + label + "</div>"
+        "<div style=\"flex:1;height:5px;background:#e5e7eb;border-radius:2px;overflow:hidden;border:1px solid #d1d5db;\">"
         "<div style=\"height:100%;width:" + str(value) + "%;background:" + color + ";border-radius:2px;\"></div>"
         "</div>"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;width:28px;text-align:right;font-weight:500;color:" + text_color + ";\">" + str(value) + "</div>"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;width:28px;text-align:right;font-weight:500;color:" + text_color + " !important;\">" + str(value) + "</div>"
         "</div>"
     )
 
@@ -1004,18 +1004,18 @@ def player_card_html(p, show_writeup=False):
     stats_html = ""
     if ts:
         stats_html = (
-            "<div style=\"display:flex;border-bottom:1px solid #dde2ee;\">"
+            "<div style=\"display:flex;border-bottom:1px solid #dde2ee;background:#ffffff !important;\">"
             "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;\">" + str(ts) + "%</span>"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;\">TS%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;color:#111827 !important;\">" + str(ts) + "%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280 !important;display:block;margin-top:2px;\">TS%</span>"
             "</div>"
             "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;\">"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;\">" + str(usg) + "%</span>"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;\">USG%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;color:#111827 !important;\">" + str(usg) + "%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280 !important;display:block;margin-top:2px;\">USG%</span>"
             "</div>"
             "<div style=\"flex:1;padding:9px 0;text-align:center;\">"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;\">" + str(p3) + "%</span>"
-            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;\">3P%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;color:#111827 !important;\">" + str(p3) + "%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#6b7280 !important;display:block;margin-top:2px;\">3P%</span>"
             "</div>"
             "</div>"
         )
@@ -1041,23 +1041,23 @@ def player_card_html(p, show_writeup=False):
         )
 
     return (
-        "<div style=\"background:#fff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06),0 4px 16px rgba(0,0,0,.04);margin-bottom:14px;\">"
-        "<div style=\"padding:14px 16px 10px;border-bottom:1px solid #dde2ee;\">"
+        "<div style=\"background:#ffffff !important;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12),0 4px 16px rgba(0,0,0,.08);margin-bottom:14px;color:#111827 !important;\">"
+        "<div style=\"padding:14px 16px 10px;border-bottom:1px solid #dde2ee;background:#ffffff !important;\">"
         "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;\">"
         "<div>"
-        "<div style=\"font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:800;letter-spacing:.02em;line-height:1;\">" + name + "</div>"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;color:#8e97b8;margin-top:4px;\">" + height + " &nbsp;&middot;&nbsp; " + pos + " &nbsp;&middot;&nbsp; " + cls + " &nbsp;&middot;&nbsp; " + school + "</div>"
+        "<div style=\"font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:800;letter-spacing:.02em;line-height:1;color:#111827 !important;\">" + name + "</div>"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;color:#6b7280 !important;margin-top:4px;\">" + height + " &nbsp;&middot;&nbsp; " + pos + " &nbsp;&middot;&nbsp; " + cls + " &nbsp;&middot;&nbsp; " + school + "</div>"
         "</div>"
-        "<span style=\"font-family:'DM Mono',monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;white-space:nowrap;font-weight:600;\">" + tier + "</span>"
+        "<span style=\"font-family:'DM Mono',monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a !important;white-space:nowrap;font-weight:600;\">" + tier + "</span>"
         "</div>"
         "</div>"
         + stats_html +
-        "<div style=\"padding:12px 16px 8px;\">" + skills_html + "</div>"
-        "<div style=\"padding:0 16px 10px;\">" + tags_html + "</div>"
-        "<div style=\"padding:10px 16px;border-top:1px solid #dde2ee;background:#f5f7fb;\">"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#8e97b8;\">" + tier + "</div>"
-        "<div style=\"font-size:12px;font-weight:600;color:#4b5577;margin-top:1px;\">" + projection + "</div>"
-        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#2774AE;margin-top:2px;\">" + role + "</div>"
+        "<div style=\"padding:12px 16px 8px;background:#ffffff !important;\">" + skills_html + "</div>"
+        "<div style=\"padding:0 16px 10px;background:#ffffff !important;\">" + tags_html + "</div>"
+        "<div style=\"padding:10px 16px;border-top:1px solid #dde2ee;background:#f5f7fb !important;\">"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280 !important;\">" + tier + "</div>"
+        "<div style=\"font-size:12px;font-weight:600;color:#111827 !important;margin-top:1px;\">" + projection + "</div>"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#2774AE !important;margin-top:2px;\">" + role + "</div>"
         "</div>"
         + writeup_section +
         "</div>"
@@ -1086,6 +1086,8 @@ with tab5:
 
     tier_options = sorted(list(set(p["tier"] for p in players_to_show)))
     tier_filter = st.multiselect("Filter by Tier:", tier_options, default=tier_options)
+    if not tier_filter:
+        tier_filter = tier_options
 
     show_writeups = st.checkbox("Show scouting writeups", value=False)
 
@@ -1173,4 +1175,3 @@ with tab5:
                                 "</div>"
                             )
                             st.markdown(html, unsafe_allow_html=True)
-                            
