@@ -894,16 +894,77 @@ UCLA_ROSTER_CARDS = [
     {"name":"Azavier Robinson","school":"UCLA","cls":"Fr","pos":"G","height":"6'2\"","tier":"Tier 4","shooting":73,"playmaking":72,"defense":90,"rebounding":65,"tags":["Elite Perimeter Lockdown","Defensive Disruptor","High Motor"],"projection":"High-usage bench spark","role":"Perimeter Lockdown Guard"},
 ]
 
-COMP_POOL = [
-    {"name":"Dalton Knecht","height":"6'6\"","pos":"Wing","before_school":"Northern Colorado","before_conf":"Big Sky","before_tier":4,"after_school":"Tennessee","before_ppg":21.7,"before_rpg":4.8,"before_p3":41.0,"before_ts":62.0,"before_usg":28.0,"after_ppg":18.5,"after_rpg":4.4,"after_p3":39.0,"after_ts":58.0,"after_usg":26.0,"outcome":"hit","note":"Lottery pick (#17, 2024). Production held nearly exactly. One of the cleanest Big Sky to SEC transitions on record."},
-    {"name":"Ricky Council IV","height":"6'6\"","pos":"Wing","before_school":"Wichita State","before_conf":"AAC","before_tier":2,"after_school":"Arkansas","before_ppg":15.7,"before_rpg":6.0,"before_p3":35.0,"before_ts":57.0,"before_usg":22.0,"after_ppg":16.0,"after_rpg":5.8,"after_p3":32.0,"after_ts":56.0,"after_usg":23.0,"outcome":"hit","note":"First-round pick (2023). Production held almost identical."},
-    {"name":"Kris Murray","height":"6'7\"","pos":"Wing","before_school":"Northern Iowa","before_conf":"MVC","before_tier":3,"after_school":"Iowa","before_ppg":14.8,"before_rpg":7.1,"before_p3":38.0,"before_ts":57.0,"before_usg":21.0,"after_ppg":20.2,"after_rpg":7.9,"after_p3":37.0,"after_ts":59.0,"after_usg":27.0,"outcome":"hit","note":"Numbers went UP at Iowa. First-round pick. MVC competition underrated how good he already was."},
-    {"name":"Jaedon LeDee","height":"6'9\"","pos":"C","before_school":"St. Bonaventure","before_conf":"A-10","before_tier":2,"after_school":"TCU","before_ppg":14.4,"before_rpg":8.3,"before_p3":0,"before_ts":60.0,"before_usg":22.0,"after_ppg":15.1,"after_rpg":8.3,"after_p3":0,"after_ts":61.0,"after_usg":22.0,"outcome":"hit","note":"Seamless. Interior-only big whose rebounding and finishing needed zero adjustment."},
-    {"name":"Max Abmas","height":"6'1\"","pos":"PG","before_school":"Oral Roberts","before_conf":"Summit","before_tier":3,"after_school":"Texas","before_ppg":21.6,"before_rpg":3.3,"before_p3":38.0,"before_ts":60.0,"before_usg":30.0,"after_ppg":14.2,"after_rpg":2.8,"after_p3":39.0,"after_ts":57.0,"after_usg":22.0,"outcome":"role","note":"Shooting held, role shrank as expected."},
-    {"name":"Tyrese Martin","height":"6'6\"","pos":"Wing","before_school":"Rhode Island","before_conf":"A-10","before_tier":2,"after_school":"UConn","before_ppg":14.2,"before_rpg":7.9,"before_p3":36.0,"before_ts":55.0,"before_usg":20.0,"after_ppg":11.0,"after_rpg":6.4,"after_p3":33.0,"after_ts":53.0,"after_usg":18.0,"outcome":"role","note":"Won a national title. Role shrank modestly. Switchable defensive wing exactly what Hurley needed."},
-    {"name":"Kevin Obanor","height":"6'8\"","pos":"PF","before_school":"Oral Roberts","before_conf":"Summit","before_tier":3,"after_school":"Texas Tech","before_ppg":19.8,"before_rpg":9.4,"before_p3":40.0,"before_ts":61.0,"before_usg":27.0,"after_ppg":10.0,"after_rpg":5.6,"after_p3":33.0,"after_ts":52.0,"after_usg":16.0,"outcome":"mixed","note":"Summit numbers overstated impact. Big 12 physicality exposed real limitations."},
-    {"name":"Andrew Funk","height":"6'5\"","pos":"Wing","before_school":"Bucknell","before_conf":"Patriot","before_tier":4,"after_school":"Penn State","before_ppg":19.1,"before_rpg":4.5,"before_p3":42.0,"before_ts":63.0,"before_usg":25.0,"after_ppg":8.5,"after_rpg":2.4,"after_p3":39.0,"after_ts":57.0,"after_usg":13.0,"outcome":"miss","note":"Production cratered at Penn State. Athleticism and creation gaps exposed badly in the Big Ten."},
-]
+@st.cache_data(ttl=3600)
+def fetch_torvik_year(year):
+    url = f"https://barttorvik.com/getadvstats.php?year={year}&page=playerstat&json=1"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://barttorvik.com/"
+    }
+    try:
+        resp = requests.get(url, headers=headers, verify=False, timeout=20)
+        raw = resp.json()
+        results = []
+        for row in raw:
+            if len(row) < 53:
+                continue
+            def sf(idx):
+                try:
+                    v = row[idx]
+                    return float(v) if v not in (None, "") else 0.0
+                except:
+                    return 0.0
+            results.append({
+                "name": str(row[0]),
+                "team": str(row[1]),
+                "conf": str(row[2]),
+                "year": year,
+                "cls": str(row[25]) if len(row) > 25 else "",
+                "height": str(row[26]) if len(row) > 26 else "",
+                "ts": sf(8),
+                "usg": sf(6),
+                "p3": sf(21) * 100,
+                "ast": sf(11),
+                "blk": sf(22),
+                "stl": sf(23),
+                "orb": sf(9),
+                "drb": sf(10),
+                "bpm": sf(50),
+                "dbpm": sf(52),
+                "min_pct": sf(4),
+            })
+        return results
+    except:
+        return []
+
+
+def conf_tier(conf):
+    c = (conf or "").lower()
+    if any(x in c for x in ["big ten", "big 12", "sec", "acc", "big east", "pac"]):
+        return 1
+    if any(x in c for x in ["wcc", "a-10", "a10", "mwc", "aac", "american"]):
+        return 2
+    if any(x in c for x in ["mvc", "socon", "caa", "horizon", "summit", "asun"]):
+        return 3
+    return 4
+
+
+def score_historical_comp(player, hist):
+    def nd2(a, b, r):
+        try:
+            return max(0.0, 1.0 - abs(float(a) - float(b)) / r)
+        except:
+            return 0.0
+    s = 0.0
+    s += nd2(player.get("ts", 0), hist["ts"], 15) * 0.25
+    s += nd2(player.get("usg", 0), hist["usg"], 12) * 0.20
+    s += nd2(player.get("p3", 0), hist["p3"], 15) * 0.15
+    s += nd2(conf_tier(player.get("school", "")), conf_tier(hist["conf"]), 2) * 0.15
+    s += nd2(player.get("defense", 50), hist["dbpm"] * 10 + 50, 20) * 0.10
+    s += nd2(player.get("playmaking", 50), hist["ast"] * 2, 20) * 0.10
+    s += nd2(player.get("rebounding", 50), (hist["orb"] + hist["drb"]) * 2, 20) * 0.05
+    return s
 
 
 def skill_bar_html(label, value):
@@ -916,40 +977,51 @@ def skill_bar_html(label, value):
     else:
         color = "#dc2626"
         text_color = "#dc2626"
-    return f"""
-        <div style='display:flex;align-items:center;gap:10px;margin-bottom:5px;'>
-            <div style='font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#4b5577;width:82px;flex-shrink:0;'>{label}</div>
-            <div style='flex:1;height:5px;background:#edf0f7;border-radius:2px;overflow:hidden;border:1px solid #dde2ee;'>
-                <div style='height:100%;width:{value}%;background:{color};border-radius:2px;'></div>
-            </div>
-            <div style='font-family:"DM Mono",monospace;font-size:10px;width:28px;text-align:right;font-weight:500;color:{text_color};'>{value}</div>
-        </div>"""
+    return (
+        "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:5px;\">"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#4b5577;width:82px;flex-shrink:0;\">" + label + "</div>"
+        "<div style=\"flex:1;height:5px;background:#edf0f7;border-radius:2px;overflow:hidden;border:1px solid #dde2ee;\">"
+        "<div style=\"height:100%;width:" + str(value) + "%;background:" + color + ";border-radius:2px;\"></div>"
+        "</div>"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;width:28px;text-align:right;font-weight:500;color:" + text_color + ";\">" + str(value) + "</div>"
+        "</div>"
+    )
 
 
 def player_card_html(p, show_writeup=False):
     tier = p.get("tier", "")
-    tier_color = {"Tier 2": "#2774AE", "Tier 3": "#16a34a", "Tier 4": "#F0B429", "Tier 5": "#dc2626", "Tier 6": "#6b7280"}.get(tier, "#6b7280")
+    ts = p.get("ts", "")
+    usg = p.get("usg", "")
+    p3 = p.get("p3", "0")
+    name = p.get("name", "")
+    height = p.get("height", "")
+    pos = p.get("pos", "")
+    cls = p.get("cls", "")
+    school = p.get("school", "")
+    projection = p.get("projection", "")
+    role = p.get("role", "")
 
     stats_html = ""
-    if p.get("ts"):
-        stats_html = f"""
-            <div style='display:flex;border-bottom:1px solid #dde2ee;'>
-                <div style='flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;'>
-                    <span style='font-family:"DM Mono",monospace;font-size:13px;font-weight:500;display:block;'>{p['ts']}%</span>
-                    <span style='font-family:"DM Mono",monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;'>TS%</span>
-                </div>
-                <div style='flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;'>
-                    <span style='font-family:"DM Mono",monospace;font-size:13px;font-weight:500;display:block;'>{p['usg']}%</span>
-                    <span style='font-family:"DM Mono",monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;'>USG%</span>
-                </div>
-                <div style='flex:1;padding:9px 0;text-align:center;'>
-                    <span style='font-family:"DM Mono",monospace;font-size:13px;font-weight:500;display:block;'>{p.get("p3", "0")}%</span>
-                    <span style='font-family:"DM Mono",monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;'>3P%</span>
-                </div>
-            </div>"""
+    if ts:
+        stats_html = (
+            "<div style=\"display:flex;border-bottom:1px solid #dde2ee;\">"
+            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;\">" + str(ts) + "%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;\">TS%</span>"
+            "</div>"
+            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;\">" + str(usg) + "%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;\">USG%</span>"
+            "</div>"
+            "<div style=\"flex:1;padding:9px 0;text-align:center;\">"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:13px;font-weight:500;display:block;\">" + str(p3) + "%</span>"
+            "<span style=\"font-family:'DM Mono',monospace;font-size:7px;letter-spacing:.1em;text-transform:uppercase;color:#8e97b8;display:block;margin-top:2px;\">3P%</span>"
+            "</div>"
+            "</div>"
+        )
 
     tags_html = "".join([
-        f"<span style='font-family:\"DM Mono\",monospace;font-size:8px;letter-spacing:.05em;text-transform:uppercase;padding:4px 9px;border-radius:3px;background:#e8f1f9;border:1px solid #b8d3ec;color:#2774AE;font-weight:500;margin:2px;display:inline-block;'>{t}</span>"
+        "<span style=\"font-family:'DM Mono',monospace;font-size:8px;letter-spacing:.05em;text-transform:uppercase;padding:4px 9px;border-radius:3px;background:#e8f1f9;border:1px solid #b8d3ec;color:#2774AE;font-weight:500;margin:2px;display:inline-block;\">" + t + "</span>"
         for t in p.get("tags", [])
     ])
 
@@ -962,38 +1034,34 @@ def player_card_html(p, show_writeup=False):
 
     writeup_section = ""
     if show_writeup and p.get("writeup"):
-        writeup_section = f"""
-            <div style='padding:10px 14px;border-top:1px solid #dde2ee;font-size:12px;line-height:1.65;color:#4b5577;'>
-                {p["writeup"]}
-            </div>"""
+        writeup_section = (
+            "<div style=\"padding:10px 14px;border-top:1px solid #dde2ee;font-size:12px;line-height:1.65;color:#4b5577;\">"
+            + p["writeup"] +
+            "</div>"
+        )
 
-    return f"""
-        <div style='background:#fff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06),0 4px 16px rgba(0,0,0,.04);margin-bottom:14px;'>
-            <div style='padding:14px 16px 10px;border-bottom:1px solid #dde2ee;'>
-                <div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;'>
-                    <div>
-                        <div style='font-family:"Barlow Condensed",sans-serif;font-size:19px;font-weight:800;letter-spacing:.02em;line-height:1;'>{p["name"]}</div>
-                        <div style='font-family:"DM Mono",monospace;font-size:10px;color:#8e97b8;margin-top:4px;'>{p.get("height","")} &nbsp;·&nbsp; {p.get("pos","")} &nbsp;·&nbsp; {p.get("cls","")} &nbsp;·&nbsp; {p.get("school","")}</div>
-                    </div>
-                    <span style='font-family:"DM Mono",monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;white-space:nowrap;font-weight:600;'>{tier}</span>
-                </div>
-            </div>
-            {stats_html}
-            <div style='padding:12px 16px 8px;'>
-                {skills_html}
-            </div>
-            <div style='padding:0 16px 10px;'>
-                {tags_html}
-            </div>
-            <div style='padding:10px 16px;border-top:1px solid #dde2ee;display:flex;justify-content:space-between;align-items:center;background:#f5f7fb;'>
-                <div>
-                    <div style='font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#8e97b8;'>{tier}</div>
-                    <div style='font-size:12px;font-weight:600;color:#4b5577;margin-top:1px;'>{p.get("projection","")}</div>
-                    <div style='font-family:"DM Mono",monospace;font-size:9px;color:#2774AE;margin-top:2px;'>{p.get("role","")}</div>
-                </div>
-            </div>
-            {writeup_section}
-        </div>"""
+    return (
+        "<div style=\"background:#fff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06),0 4px 16px rgba(0,0,0,.04);margin-bottom:14px;\">"
+        "<div style=\"padding:14px 16px 10px;border-bottom:1px solid #dde2ee;\">"
+        "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;\">"
+        "<div>"
+        "<div style=\"font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:800;letter-spacing:.02em;line-height:1;\">" + name + "</div>"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:10px;color:#8e97b8;margin-top:4px;\">" + height + " &nbsp;&middot;&nbsp; " + pos + " &nbsp;&middot;&nbsp; " + cls + " &nbsp;&middot;&nbsp; " + school + "</div>"
+        "</div>"
+        "<span style=\"font-family:'DM Mono',monospace;font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;white-space:nowrap;font-weight:600;\">" + tier + "</span>"
+        "</div>"
+        "</div>"
+        + stats_html +
+        "<div style=\"padding:12px 16px 8px;\">" + skills_html + "</div>"
+        "<div style=\"padding:0 16px 10px;\">" + tags_html + "</div>"
+        "<div style=\"padding:10px 16px;border-top:1px solid #dde2ee;background:#f5f7fb;\">"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#8e97b8;\">" + tier + "</div>"
+        "<div style=\"font-size:12px;font-weight:600;color:#4b5577;margin-top:1px;\">" + projection + "</div>"
+        "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#2774AE;margin-top:2px;\">" + role + "</div>"
+        "</div>"
+        + writeup_section +
+        "</div>"
+    )
 
 
 def comp_score(sub_ts, sub_usg, sub_p3, sub_tier, hist):
@@ -1043,57 +1111,66 @@ with tab5:
             # Comp finder expander
             if p.get("ts") and card_mode == "Transfer Portal":
                 with st.expander(f"Find Historical Comps: {p['name']}"):
-                    tier_map = {"Tier 1": 1, "Tier 2": 2, "Tier 3": 3, "Tier 4": 4, "Tier 5": 5, "Tier 6": 6}
-                    p_tier = tier_map.get(p["tier"], 3)
-                    scored = []
-                    for c in COMP_POOL:
-                        s = comp_score(p.get("ts", 0), p.get("usg", 0), p.get("p3", 0), p_tier, c)
-                        scored.append((s, c))
-                    scored.sort(key=lambda x: x[0], reverse=True)
-                    top_comps = scored[:4]
+                    st.caption("Pulling from BartTorvik historical database (2018-2024)...")
+                    all_hist = []
+                    for yr in [2024, 2023, 2022, 2021, 2020, 2019, 2018]:
+                        yr_data = fetch_torvik_year(yr)
+                        if yr_data:
+                            all_hist.extend(yr_data)
 
-                    outcome_colors = {"hit": "#16a34a", "role": "#2774AE", "mixed": "#F0B429", "miss": "#dc2626"}
-                    outcome_labels = {"hit": "Translated", "role": "Role Player", "mixed": "Mixed", "miss": "Busted"}
+                    if not all_hist:
+                        st.warning("Could not load historical data from BartTorvik.")
+                    else:
+                        # filter to players with meaningful minutes
+                        pool = [h for h in all_hist if h["min_pct"] >= 20 and h["usg"] >= 10]
 
-                    for score, c in top_comps:
-                        pct = int(score * 100)
-                        oc = c["outcome"]
-                        col_str = outcome_colors.get(oc, "#6b7280")
-                        badge = outcome_labels.get(oc, oc)
-                        st.markdown(f"""
-                            <div style='background:#fff;border:1px solid #dde2ee;border-left:4px solid {col_str};border-radius:8px;padding:12px 14px;margin-bottom:8px;'>
-                                <div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;'>
-                                    <div>
-                                        <div style='font-size:14px;font-weight:700;'>{c["name"]}</div>
-                                        <div style='font-family:"DM Mono",monospace;font-size:9px;color:#8e97b8;margin-top:2px;'>{c["height"]} · {c["pos"]} · {c["before_school"]} ({c["before_conf"]})</div>
-                                    </div>
-                                    <span style='font-family:"DM Mono",monospace;font-size:8px;font-weight:600;letter-spacing:.08em;padding:4px 8px;border-radius:3px;background:{col_str}20;color:{col_str};border:1px solid {col_str}40;'>{badge}</span>
-                                </div>
-                                <div style='font-family:"DM Mono",monospace;font-size:10px;color:#4b5577;margin-bottom:8px;'>
-                                    {c["before_school"]} &rarr; {c["after_school"]}
-                                </div>
-                                <div style='display:flex;background:#f5f7fb;border:1px solid #dde2ee;border-radius:5px;overflow:hidden;margin-bottom:8px;'>
-                                    <div style='flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;'>
-                                        <div style='font-family:"DM Mono",monospace;font-size:11px;font-weight:500;'>{c["before_ppg"]} &rarr; {c.get("after_ppg","—")}</div>
-                                        <div style='font-family:"DM Mono",monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;letter-spacing:.08em;'>PPG</div>
-                                    </div>
-                                    <div style='flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;'>
-                                        <div style='font-family:"DM Mono",monospace;font-size:11px;font-weight:500;'>{c["before_ts"]}% &rarr; {c.get("after_ts","—")}%</div>
-                                        <div style='font-family:"DM Mono",monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;letter-spacing:.08em;'>TS%</div>
-                                    </div>
-                                    <div style='flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;'>
-                                        <div style='font-family:"DM Mono",monospace;font-size:11px;font-weight:500;'>{c["before_p3"]}% &rarr; {c.get("after_p3","—")}%</div>
-                                        <div style='font-family:"DM Mono",monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;letter-spacing:.08em;'>3P%</div>
-                                    </div>
-                                    <div style='flex:1;padding:6px 0;text-align:center;'>
-                                        <div style='font-family:"DM Mono",monospace;font-size:11px;font-weight:500;'>{c["before_usg"]}% &rarr; {c.get("after_usg","—")}%</div>
-                                        <div style='font-family:"DM Mono",monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;letter-spacing:.08em;'>USG%</div>
-                                    </div>
-                                </div>
-                                <div style='font-size:11px;line-height:1.6;color:#4b5577;'>{c["note"]}</div>
-                                <div style='margin-top:8px;height:3px;background:#edf0f7;border-radius:2px;'>
-                                    <div style='height:100%;width:{pct}%;background:{col_str};border-radius:2px;'></div>
-                                </div>
-                                <div style='font-family:"DM Mono",monospace;font-size:8px;color:#8e97b8;margin-top:3px;text-align:right;'>{pct}% match</div>
-                            </div>
-                        """, unsafe_allow_html=True)
+                        scored = []
+                        for h in pool:
+                            s = score_historical_comp(p, h)
+                            scored.append((s, h))
+                        scored.sort(key=lambda x: x[0], reverse=True)
+                        top_comps = scored[:6]
+
+                        st.write(f"**Top statistical comps from {len(pool):,} historical seasons:**")
+                        for score, c in top_comps:
+                            pct = int(score * 100)
+                            html = (
+                                "<div style=\"background:#fff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
+                                "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
+                                "<div>"
+                                "<div style=\"font-size:14px;font-weight:700;\">" + c["name"] + "</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:9px;color:#8e97b8;margin-top:2px;\">"
+                                + c["height"] + " &nbsp;&middot;&nbsp; " + c["team"] + " (" + c["conf"] + ") &nbsp;&middot;&nbsp; " + str(c["year"]) +
+                                "</div>"
+                                "</div>"
+                                "<span style=\"font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
+                                "</div>"
+                                "<div style=\"display:flex;background:#f5f7fb;border:1px solid #dde2ee;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["ts"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">TS%</div>"
+                                "</div>"
+                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["usg"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">USG%</div>"
+                                "</div>"
+                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["p3"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">3P%</div>"
+                                "</div>"
+                                "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #dde2ee;\">"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["bpm"], 1)) + "</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">BPM</div>"
+                                "</div>"
+                                "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:11px;font-weight:500;\">" + str(round(c["ast"], 1)) + "%</div>"
+                                "<div style=\"font-family:'DM Mono',monospace;font-size:7px;color:#8e97b8;text-transform:uppercase;\">AST%</div>"
+                                "</div>"
+                                "</div>"
+                                "<div style=\"height:3px;background:#edf0f7;border-radius:2px;\">"
+                                "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
+                                "</div>"
+                                "</div>"
+                            )
+                            st.markdown(html, unsafe_allow_html=True)
+                            
