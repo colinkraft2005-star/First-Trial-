@@ -1301,11 +1301,17 @@ with tab5:
                         scored = []
                         for h in pool:
                             s = score_historical_comp(p, h)
-                            scored.append((s, h))
+                            if s > 0.0:
+                                scored.append((s, h))
                         scored.sort(key=lambda x: x[0], reverse=True)
                         top_comps = scored[:6]
 
-                        st.write(f"**Top statistical comps from {len(pool):,} historical seasons:**")
+                        # debug: show sample heights from BartTorvik to verify parsing
+                        sample_heights = list(set([h["height"] for h in pool[:50] if h["height"]]))[:8]
+                        player_h_in = height_inches(p.get("height", "6'6\""))
+                        st.caption(f"Sample heights from DB: {sample_heights}")
+                        st.caption(f"Player height: {p.get('height','')} = {player_h_in} inches")
+                        st.write(f"**Top statistical comps from {len(pool):,} historical seasons ({len(scored)} passed height+pos+conf filters):**")
                         for score, c in top_comps:
                             pct = int(score * 100)
                             html = (
