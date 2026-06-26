@@ -8,7 +8,16 @@ import math
 import ssl
 import urllib3
 import time
+import bisect
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import Arc, Circle, FancyArrow, Rectangle
 from datetime import datetime
+
+P5_CONFS = {"ACC", "B10", "B12", "BE", "SEC"}
 
 # ==========================================
 # LOCAL MAC SSL OVERRIDE
@@ -204,7 +213,10 @@ def fetch_barttorvik_safe(top_filter=None, retries=3, delay_between_requests=4):
                         "PLAYER":      str(row[0]),
                         "TEAM":        str(row[1]),
                         "CONF":        str(row[2]),
+                        "GP":          int(row[3]) if row[3] else 0,
                         "MIN_PCT":     safe_float(row, 4),
+                        "MPG":         safe_float(row, 54),
+                        "PPG":         safe_float(row, 63) if len(row) > 63 else 0.0,
                         "ORTG":        safe_float(row, 5),
                         "USG":         safe_float(row, 6),
                         "EFG":         safe_float(row, 7),
@@ -238,45 +250,441 @@ def fetch_barttorvik_safe(top_filter=None, retries=3, delay_between_requests=4):
 def load_all_data_v6():
     return fetch_barttorvik_safe(top_filter=None)
 
-@st.cache_data(ttl=3600)
-def load_top100_data_v6():
-    time.sleep(3)
-    return fetch_barttorvik_safe(top_filter=100)
 
 @st.cache_data(ttl=3600)
-def load_top50_data_v6():
-    time.sleep(6)
-    return fetch_barttorvik_safe(top_filter=50)
+def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
+    """
+    Box-score derived per-player stats, optionally filtered by opponent rank.
+    Joins player_game_logs with game_team_stats for rate stats (USG, AST, ORB, DRB, BLK, STL).
+    Same formula for All Games / Top 100 / Top 50 — fully comparable currency.
+    """
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        # Use KenPom rank if available, fall back to BartTorvik rank
+        if max_opp_rank:
+            where = f"AND COALESCE(p.kp_opp_rank, p.opp_rank) <= {int(max_opp_rank)}"
+        else:
+            where = ""
+        df = pd.read_sql_query(f"""
+            SELECT
+                p.player_name                                                    AS PLAYER,
+                p.team_espn_id,
+                p.team_name                                                      AS TEAM,
+                COUNT(*)                                                         AS GP,
+                ROUND(AVG(p.pts), 1)                                             AS PPG,
+                ROUND(SUM(p.pts)*100.0 /
+                    NULLIF(2.0*(SUM(p.fg_att)+0.44*SUM(p.ft_att)), 0), 1)       AS TS,
+                ROUND((SUM(p.fg_made)+0.5*SUM(p.fg3_made))*100.0 /
+                    NULLIF(SUM(p.fg_att), 0), 1)                                 AS EFG,
+                ROUND((SUM(p.fg_made)-SUM(p.fg3_made))*100.0 /
+                    NULLIF(SUM(p.fg_att)-SUM(p.fg3_att), 0), 1)                 AS TWO_P,
+                ROUND(SUM(p.fg3_made)*100.0 /
+                    NULLIF(SUM(p.fg3_att), 0), 1)                                AS THREE_P,
+                ROUND(SUM(p.ft_made)*100.0 /
+                    NULLIF(SUM(p.ft_att), 0), 1)                                 AS FT_PCT,
+                ROUND(SUM(p.ft_att)*100.0 /
+                    NULLIF(SUM(p.fg_att), 0), 1)                                 AS FTR,
+                ROUND(SUM(CASE WHEN t.fga IS NOT NULL THEN p.fg_att + 0.44*p.ft_att + p.tov END)*100.0 /
+                    NULLIF(SUM(t.fga)+0.44*SUM(t.fta)+SUM(t.tov), 0), 1)        AS USG,
+                ROUND(SUM(CASE WHEN t.fgm IS NOT NULL THEN p.ast END)*100.0 /
+                    NULLIF(
+                        (SUM(CASE WHEN t.fgm IS NOT NULL THEN p.min_played END)*1.0 /
+                         NULLIF(SUM(CASE WHEN t.fgm IS NOT NULL THEN tm.team_mp END)/5.0, 0))
+                        * SUM(t.fgm)
+                        - SUM(CASE WHEN t.fgm IS NOT NULL THEN p.fg_made END),
+                    0), 1) AS AST_PCT,
+                ROUND(SUM(CASE WHEN t.orb IS NOT NULL THEN p.orb END)*100.0 /
+                    NULLIF(SUM(t.orb)+SUM(t.opp_drb), 0), 1)                    AS OR_PCT,
+                ROUND(SUM(CASE WHEN t.drb IS NOT NULL THEN p.drb END)*100.0 /
+                    NULLIF(SUM(t.drb)+SUM(t.opp_orb), 0), 1)                    AS DR_PCT,
+                ROUND(SUM(CASE WHEN t.opp_fga IS NOT NULL THEN p.blk END)*100.0 /
+                    NULLIF(SUM(t.opp_fga)-SUM(t.opp_fg3a), 0), 1)               AS BLK_PCT,
+                ROUND(SUM(CASE WHEN t.possessions IS NOT NULL THEN p.stl END)*100.0 /
+                    NULLIF(SUM(t.possessions), 0), 1)                            AS STL_PCT,
+                ROUND(AVG(CASE WHEN p.ortg_kp IS NOT NULL THEN p.ortg_kp END), 1) AS ORTG_KP,
+                ROUND(AVG(CASE WHEN p.usage_kp IS NOT NULL THEN p.usage_kp END), 1) AS USAGE_KP
+            FROM player_game_logs p
+            LEFT JOIN game_team_stats t
+                ON t.team_espn_id = p.team_espn_id AND t.game_date = p.game_date
+            LEFT JOIN (
+                SELECT team_espn_id, game_date, SUM(min_played) AS team_mp
+                FROM player_game_logs
+                GROUP BY team_espn_id, game_date
+            ) tm ON tm.team_espn_id = p.team_espn_id AND tm.game_date = p.game_date
+            WHERE p.min_played >= 1 {where}
+            GROUP BY p.player_name, p.team_espn_id
+            HAVING COUNT(*) >= 3
+        """, conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=600)
+def load_p5_percentile_benchmarks(_df_all: pd.DataFrame, max_opp_rank=None) -> dict:
+    """
+    Returns {pos_group: {stat: sorted_list}} for P5 players.
+    Used to percentile-rank any player's stats against same-position P5 peers.
+    """
+    try:
+        # Guard: don't build benchmarks until player ORB/DRB data is populated
+        conn0 = sqlite3.connect("scouting_hub.db")
+        orb_rows = conn0.execute("SELECT COUNT(*) FROM player_game_logs WHERE orb > 0").fetchone()[0]
+        conn0.close()
+        if orb_rows < 50000:
+            return {}
+
+        all_box = load_consistent_boxscore_stats(max_opp_rank)
+        if all_box.empty:
+            return {}
+
+        conn = sqlite3.connect("scouting_hub.db")
+        rankings = pd.read_sql_query("SELECT espn_id, bart_name FROM team_rankings", conn)
+        positions = pd.read_sql_query("SELECT player_name, position_group FROM player_positions", conn)
+        conn.close()
+
+        p5_bart_teams = set(_df_all[_df_all["CONF"].isin(P5_CONFS)]["TEAM"].unique())
+        p5_espn_ids   = set(rankings[rankings["bart_name"].isin(p5_bart_teams)]["espn_id"].tolist())
+
+        p5 = all_box[all_box["team_espn_id"].isin(p5_espn_ids)].copy()
+        p5 = p5.merge(positions, left_on="PLAYER", right_on="player_name", how="left")
+        p5["position_group"] = p5["position_group"].fillna("Wing")
+
+        STAT_COLS = ["PPG", "TS", "EFG", "TWO_P", "THREE_P", "FT_PCT",
+                     "FTR", "USG", "AST_PCT", "OR_PCT", "DR_PCT", "BLK_PCT", "STL_PCT",
+                     "ORTG_KP", "USAGE_KP"]
+        benchmarks = {}
+        for grp in ("Guard", "Wing", "Big"):
+            sub = p5[p5["position_group"] == grp]
+            benchmarks[grp] = {
+                col: sorted(sub[col].dropna().tolist())
+                for col in STAT_COLS if col in sub.columns
+            }
+        return benchmarks
+    except Exception:
+        return {}
+
+
+def get_player_position_group(player_name: str) -> str:
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        row = conn.execute(
+            "SELECT position_group FROM player_positions WHERE player_name = ?",
+            (player_name,)
+        ).fetchone()
+        conn.close()
+        return row[0] if row else "Wing"
+    except Exception:
+        return "Wing"
+
+
+def get_pct(val, sorted_vals: list):
+    if not sorted_vals or val is None or (isinstance(val, float) and math.isnan(val)):
+        return None
+    rank = bisect.bisect_left(sorted_vals, val)
+    return 100.0 * rank / len(sorted_vals)
+
+
+def pct_color(pct):
+    """Blue (0th pct) → White (50th pct) → Gold (100th pct). Returns (bg_hex, text_hex)."""
+    if pct is None:
+        return "#EAECF0", "#1A1A1A"
+    t = max(0.0, min(100.0, pct)) / 100.0
+    if t <= 0.5:
+        # Blue (#2774AE) → White (#FFFFFF)
+        s = t / 0.5
+        r = int(39  + (255 - 39)  * s)
+        g = int(116 + (255 - 116) * s)
+        b = int(174 + (255 - 174) * s)
+    else:
+        # White (#FFFFFF) → Gold (#FFD100)
+        s = (t - 0.5) / 0.5
+        r = int(255 + (255 - 255) * s)
+        g = int(255 + (209 - 255) * s)
+        b = int(255 + (0   - 255) * s)
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    text = "#FFFFFF" if lum < 148 else "#1A1A1A"
+    return f"#{r:02x}{g:02x}{b:02x}", text
+
+
+def render_pct_stat_cards(cards: list, per_row: int = 4):
+    """
+    Render colored stat cards.
+    cards = list of (label, value_str, percentile_0_100 | None)
+    Background: blue (0th pct) → white (50th) → gold (100th). Gray if None.
+    """
+    for row_start in range(0, len(cards), per_row):
+        row_cards = cards[row_start: row_start + per_row]
+        cols = st.columns(per_row)
+        for col, (label, val, pct) in zip(cols, row_cards):
+            bg, fg = pct_color(pct)
+            pct_label = f" ({pct:.0f}th)" if pct is not None else ""
+            col.markdown(
+                f"""<div style="background:{bg};border-radius:8px;padding:11px 6px 9px;
+                    text-align:center;margin:3px 0;min-height:60px;">
+                  <div style="font-size:9.5px;color:{fg};opacity:0.9;font-weight:500;
+                    letter-spacing:0.3px;line-height:1.2;">{label}</div>
+                  <div style="font-size:17px;font-weight:700;color:{fg};margin-top:4px;
+                    line-height:1;">{val}</div>
+                  <div style="font-size:8px;color:{fg};opacity:0.75;margin-top:2px;">{pct_label}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+
+@st.cache_data(ttl=3600)
+def load_quality_game_stats(max_opp_rank: int) -> pd.DataFrame:
+    """
+    Query the local SQLite game-log DB for per-player averages in games
+    where the opponent was ranked <= max_opp_rank (BartTorvik-derived rank).
+    Returns empty DataFrame if build_game_logs.py hasn't been run yet.
+    """
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query(
+            """
+            SELECT
+                player_name                                              AS PLAYER,
+                team_name                                                AS TEAM,
+                COUNT(*)                                                 AS GP,
+                ROUND(AVG(pts),  1)                                      AS PPG,
+                ROUND(AVG(reb),  1)                                      AS RPG,
+                ROUND(AVG(ast),  1)                                      AS APG,
+                ROUND(AVG(tov),  1)                                      AS TOV,
+                ROUND(AVG(stl),  1)                                      AS STL,
+                ROUND(AVG(blk),  1)                                      AS BLK,
+                ROUND(
+                    CAST(SUM(fg_made)  AS REAL) /
+                    NULLIF(SUM(fg_att), 0) * 100, 1)                    AS [FG%],
+                ROUND(
+                    CAST(SUM(fg3_made) AS REAL) /
+                    NULLIF(SUM(fg3_att), 0) * 100, 1)                   AS [3P%],
+                ROUND(
+                    CAST(SUM(ft_made)  AS REAL) /
+                    NULLIF(SUM(ft_att), 0) * 100, 1)                    AS [FT%],
+                ROUND(
+                    CAST(SUM(pts) AS REAL) /
+                    NULLIF(2.0 * (SUM(fg_att) + 0.44 * SUM(ft_att)), 0)
+                    * 100, 1)                                            AS [TS%],
+                ROUND(
+                    (CAST(SUM(fg_made) AS REAL) + 0.5 * SUM(fg3_made)) /
+                    NULLIF(SUM(fg_att), 0) * 100, 1)                    AS [EFG%]
+            FROM player_game_logs
+            WHERE opp_rank <= ?
+            GROUP BY player_name, team_name
+            HAVING COUNT(*) >= 1
+            ORDER BY PPG DESC
+            """,
+            conn,
+            params=(max_opp_rank,),
+        )
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def game_log_db_ready() -> bool:
+    """True only after build_game_logs.py has populated both core tables."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        p = conn.execute("SELECT COUNT(*) FROM player_game_logs").fetchone()[0]
+        g = conn.execute("SELECT COUNT(*) FROM game_team_stats").fetchone()[0]
+        conn.close()
+        return p > 0 and g > 0
+    except Exception:
+        return False
+
+
+def get_player_sos(espn_name: str, espn_team: str):
+    """
+    Return (avg_opp_rank, games_counted) for a player from the game log DB.
+    Lower avg_opp_rank = harder schedule.
+    """
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        row = conn.execute(
+            """SELECT ROUND(AVG(opp_rank), 0), COUNT(*)
+               FROM player_game_logs
+               WHERE player_name = ? AND team_name = ? AND opp_rank < 999""",
+            (espn_name, espn_team),
+        ).fetchone()
+        conn.close()
+        if row and row[1] and row[1] > 0:
+            return int(row[0]), int(row[1])
+    except Exception:
+        pass
+    return None, None
+
+
+@st.cache_data(ttl=3600)
+def load_player_shots(player_name: str, team_espn_id=None, max_opp_rank=None) -> pd.DataFrame:
+    """Return shot_chart rows for a player, optionally filtered by team and opponent KenPom rank."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        rank_clause = "AND gl.kp_opp_rank <= :rank" if max_opp_rank else ""
+        team_clause = "AND sc.team_id = :team_id" if team_espn_id else ""
+        params = {"name": player_name}
+        if max_opp_rank:
+            params["rank"] = max_opp_rank
+        if team_espn_id:
+            params["team_id"] = str(team_espn_id)
+        df = pd.read_sql_query(
+            f"""
+            SELECT sc.coord_x_norm AS x, sc.coord_y_norm AS y,
+                   sc.scoring_play AS made, sc.shot_type, sc.points_attempted AS pts
+            FROM shot_chart sc
+            JOIN player_game_logs gl
+                ON gl.game_date   = sc.game_date
+               AND gl.player_name = sc.player_name
+               AND gl.team_espn_id = sc.team_id
+            WHERE sc.player_name = :name
+              AND sc.shot_type != 'MadeFreeThrow'
+              {team_clause}
+              {rank_clause}
+            """,
+            conn,
+            params=params,
+        )
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _draw_half_court(ax):
+    """Draw NCAA half-court lines on a matplotlib Axes. Court: x 0-50, y 0-47."""
+    COURT_COLOR = "#1a3a5c"
+    LINE_COLOR  = "#e0e0e0"
+    LW = 1.4
+
+    ax.set_facecolor(COURT_COLOR)
+    ax.set_xlim(0, 50)
+    ax.set_ylim(-2, 47)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # Court outline
+    ax.add_patch(Rectangle((0, 0), 50, 47, linewidth=LW, edgecolor=LINE_COLOR, facecolor=COURT_COLOR, zorder=1))
+
+    # Paint (NCAA: 12 ft wide, 19 ft deep — baseline to free throw line)
+    ax.add_patch(Rectangle((19, 0), 12, 19, linewidth=LW, edgecolor=LINE_COLOR, facecolor="#0d2a46", zorder=2))
+
+    # Free throw line
+    ax.plot([19, 31], [19, 19], color=LINE_COLOR, linewidth=LW, zorder=3)
+
+    # Free throw circle (upper half solid, lower half dashed) — r=6 ft, centered at free throw line
+    th_top = np.linspace(0, np.pi, 120)
+    ax.plot(25 + 6*np.cos(th_top), 19 + 6*np.sin(th_top), color=LINE_COLOR, linewidth=LW, zorder=3)
+    th_bot = np.linspace(np.pi, 2*np.pi, 120)
+    ax.plot(25 + 6*np.cos(th_bot), 19 + 6*np.sin(th_bot), color=LINE_COLOR, linewidth=LW, linestyle="--", zorder=3)
+
+    # Restricted area arc (r=4 from basket center)
+    BASKET_X, BASKET_Y = 25.0, 5.25
+    th_ra = np.linspace(0, np.pi, 100)
+    ax.plot(BASKET_X + 4*np.cos(th_ra), BASKET_Y + 4*np.sin(th_ra), color=LINE_COLOR, linewidth=LW, zorder=3)
+
+    # Backboard
+    ax.plot([21.5, 28.5], [4.0, 4.0], color=LINE_COLOR, linewidth=2.5, zorder=4)
+
+    # Basket rim
+    ax.add_patch(Circle((BASKET_X, BASKET_Y), 0.75, linewidth=LW, edgecolor="#FFA500", facecolor="none", zorder=4))
+
+    # 3-point arc (NCAA men's: 22'1.75" = 22.15 ft from basket center)
+    R3 = 22.15
+    # Angles where arc meets y=0 (baseline)
+    dx0 = math.sqrt(max(R3**2 - BASKET_Y**2, 0))
+    left_x  = BASKET_X - dx0  # ≈ 3.5
+    right_x = BASKET_X + dx0  # ≈ 46.5
+    right_ang = math.atan2(0 - BASKET_Y, right_x - BASKET_X)  # ≈ -0.24
+    left_ang  = math.atan2(0 - BASKET_Y, left_x  - BASKET_X)  # ≈ -2.90
+    # Arc going counterclockwise from right baseline to left baseline (over the top)
+    th_3 = np.linspace(right_ang, left_ang + 2*np.pi, 250)
+    ax.plot(BASKET_X + R3*np.cos(th_3), BASKET_Y + R3*np.sin(th_3),
+            color=LINE_COLOR, linewidth=LW, zorder=3)
+
+
+def draw_shot_chart(shots_df: pd.DataFrame, title: str = "") -> plt.Figure:
+    """Return a matplotlib Figure with half-court shot chart."""
+    shots_df = shots_df[shots_df["y"] >= 0].copy() if not shots_df.empty else shots_df
+
+    fig, ax = plt.subplots(figsize=(6, 5.5))
+    fig.patch.set_facecolor("#111827")
+    _draw_half_court(ax)
+
+    if shots_df.empty:
+        ax.text(25, 24, "No shot data", ha="center", va="center",
+                color="white", fontsize=12)
+        if title:
+            ax.set_title(title, color="white", fontsize=10, pad=6)
+        return fig
+
+    made   = shots_df[shots_df["made"] == 1]
+    missed = shots_df[shots_df["made"] == 0]
+
+    ax.scatter(missed["x"], missed["y"], c="#4a9eff", s=18, alpha=0.55,
+               linewidths=0.3, edgecolors="#2060bb", zorder=5, label="Miss")
+    ax.scatter(made["x"],   made["y"],   c="#FFD700", s=18, alpha=0.70,
+               linewidths=0.3, edgecolors="#cc9900", zorder=6, label="Make")
+
+    total = len(shots_df)
+    makes = int(shots_df["made"].sum())
+    pct   = makes / total * 100 if total else 0
+
+    threes = shots_df[shots_df["pts"] == 3]
+    twos   = shots_df[shots_df["pts"] == 2]
+    t3_m   = int(threes["made"].sum())
+    t2_m   = int(twos["made"].sum())
+    t3_pct = t3_m / len(threes) * 100 if len(threes) else 0
+    t2_pct = t2_m / len(twos) * 100 if len(twos) else 0
+
+    info = (f"{makes}/{total} FG ({pct:.1f}%)   "
+            f"2pt {t2_m}/{len(twos)} ({t2_pct:.1f}%)   "
+            f"3pt {t3_m}/{len(threes)} ({t3_pct:.1f}%)")
+    ax.text(25, -1.2, info, ha="center", va="top",
+            color="#cccccc", fontsize=6.5, zorder=7)
+
+    legend = ax.legend(handles=[
+        mpatches.Patch(color="#FFD700", label=f"Make ({makes})"),
+        mpatches.Patch(color="#4a9eff", label=f"Miss ({total-makes})"),
+    ], loc="upper right", fontsize=7, framealpha=0.25,
+       labelcolor="white", facecolor="#111827", edgecolor="none")
+
+    if title:
+        ax.set_title(title, color="white", fontsize=9, pad=4)
+
+    plt.tight_layout(pad=0.3)
+    return fig
+
+
+def fmt(val, decimals=1, suffix=""):
+    """Format a numeric stat value for display."""
+    if val is None or val == 0.0 or (isinstance(val, float) and math.isnan(val)):
+        return "—"
+    if decimals == 0:
+        return f"{int(round(val))}{suffix}"
+    return f"{round(float(val), decimals)}{suffix}"
 
 
 # ==========================================
-# SEQUENTIAL DATA LOAD WITH PROGRESS BAR
+# DATA LOAD
 # ==========================================
 load_bar = st.progress(0, text="Loading full database...")
 df_all = load_all_data_v6()
-load_bar.progress(33, text="Loading Top 100 competition data...")
-df_top100 = load_top100_data_v6()
-load_bar.progress(66, text="Loading Top 50 competition data...")
-df_top50 = load_top50_data_v6()
 load_bar.progress(100, text="Database ready.")
-time.sleep(0.4)
+time.sleep(0.2)
 load_bar.empty()
 
-failed = []
-if df_all is None:    failed.append("All Games")
-if df_top100 is None: failed.append("Top 100")
-if df_top50 is None:  failed.append("Top 50")
-
-if failed:
+if df_all is None:
     st.error(
-        f"BartTorvik returned empty data for: **{', '.join(failed)}**\n\n"
-        "This usually means your IP is temporarily rate-limited by the server. "
-        "Try one of the following:\n"
-        "- Wait 10-15 minutes and rerun\n"
-        "- Switch to your phone hotspot and rerun\n"
-        "- Connect to a VPN and rerun"
+        "BartTorvik returned empty data.\n\n"
+        "This usually means your IP is temporarily rate-limited. "
+        "Wait 10-15 minutes or switch networks and reload."
     )
     st.stop()
+
+_gl_ready = game_log_db_ready()
 
 all_player_names = sorted(list(df_all["PLAYER"].unique()))
 
@@ -302,6 +710,38 @@ tab_depth, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Big Board Print View",
     "Player Card / Ranking System"
 ])
+
+# Inject JS to restore last active tab via localStorage and track future tab clicks.
+import streamlit.components.v1 as components
+components.html("""
+<script>
+(function() {
+    var savedTab = parseInt(localStorage.getItem('uclaActiveTab') || '0');
+
+    function attachListeners(tabs) {
+        tabs.forEach(function(tab, i) {
+            tab.addEventListener('click', function() {
+                localStorage.setItem('uclaActiveTab', i);
+            });
+        });
+    }
+
+    function tryRestore() {
+        var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+        if (tabs.length >= 6) {
+            attachListeners(tabs);
+            if (savedTab > 0) {
+                tabs[savedTab].click();
+            }
+        } else {
+            setTimeout(tryRestore, 100);
+        }
+    }
+
+    setTimeout(tryRestore, 150);
+})();
+</script>
+""", height=0, width=0)
 
 # ==========================================
 # TAB: DEPTH CHART (FRONT PAGE)
@@ -508,7 +948,7 @@ with tab1:
             st.info("No headshot logged")
 
     with col_info:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4 = st.columns([2.5, 1, 1, 1])
         c1.metric("Program",    p_data["TEAM"])
         c2.metric("Conference", p_data["CONF"])
         c3.metric("Class",      p_data["CLASS"])
@@ -516,35 +956,108 @@ with tab1:
         st.caption(f"📅 **Last Evaluation Update Stamped:** {saved_date}")
 
     st.write("**Player Metrics Line**")
-    stat_col1, stat_col2, stat_col3, _ = st.columns([1, 1, 1, 5])
 
-    if "profile_split" not in st.session_state:
-        st.session_state.profile_split = "All Games"
+    _split = st.radio(
+        "Competition split",
+        ["All Games", "Top 100", "Top 50"],
+        horizontal=True,
+        key="profile_split",
+        label_visibility="collapsed",
+    )
 
-    with stat_col1:
-        if st.button("All Games", key="prof_all",
-                     type="primary" if st.session_state.profile_split == "All Games" else "secondary"):
-            st.session_state.profile_split = "All Games"
-            st.rerun()
-    with stat_col2:
-        if st.button("Top 100", key="prof_100",
-                     type="primary" if st.session_state.profile_split == "Top 100" else "secondary"):
-            st.session_state.profile_split = "Top 100"
-            st.rerun()
-    with stat_col3:
-        if st.button("Top 50", key="prof_50",
-                     type="primary" if st.session_state.profile_split == "Top 50" else "secondary"):
-            st.session_state.profile_split = "Top 50"
-            st.rerun()
+    _max_rank = None if _split == "All Games" else (100 if _split == "Top 100" else 50)
 
-    split_map = {"All Games": df_all, "Top 100": df_top100, "Top 50": df_top50}
-    active_df = split_map[st.session_state.profile_split]
-
-    player_stats = active_df[active_df["PLAYER"] == current_player]
-    if player_stats.empty:
-        st.info(f"No {st.session_state.profile_split} data available for {current_player}.")
+    if not _gl_ready:
+        st.info("Run `python3 build_game_logs.py` to enable split stats.")
     else:
-        st.dataframe(player_stats.drop(columns=["CLASS", "HEIGHT"]), hide_index=True)
+        _box_df = load_consistent_boxscore_stats(_max_rank)
+        _p5_bench = load_p5_percentile_benchmarks(df_all, _max_rank)
+        _pos_group = get_player_position_group(current_player)
+
+        # Find this player in box-score stats — match by team name to resolve duplicate names
+        _pbox = _box_df[_box_df["PLAYER"] == current_player]
+        if len(_pbox) > 1:
+            _bt_team = p_data["TEAM"]
+            _team_match = _pbox[_pbox["TEAM"].str.contains(_bt_team, case=False, na=False)]
+            if not _team_match.empty:
+                _pbox = _team_match
+
+        if _pbox.empty:
+            st.info(f"No box-score data found for {current_player} in {_split} games.")
+        else:
+            r = _pbox.iloc[0]
+            gp = int(r["GP"])
+            bench = _p5_bench.get(_pos_group, {})
+
+            def _card(label, stat_key, val=None, higher_is_better=True):
+                try:
+                    v = float(r[stat_key]) if val is None else float(val)
+                except (TypeError, ValueError, KeyError):
+                    v = 0.0
+                if math.isnan(v):
+                    v = 0.0
+                sv = sorted(bench.get(stat_key, []))
+                pct = get_pct(v, sv)
+                if pct is not None and not higher_is_better:
+                    pct = 100 - pct
+                return (label, fmt(v), pct)
+
+            sos_rank, _ = get_player_sos(current_player, r["TEAM"])
+            sos_label = f"Avg Rank {sos_rank}" if sos_rank else "—"
+
+            _bench_label = f"P5 {_pos_group}s · {_split}"
+            st.caption(
+                f"**{gp} games** vs {_split} opponents · position group: **{_pos_group}** "
+                f"· colors = percentile vs {_bench_label}"
+            )
+
+            _has_kp = "ORTG_KP" in r.index and not (r["ORTG_KP"] is None or (isinstance(r["ORTG_KP"], float) and math.isnan(r["ORTG_KP"])))
+
+            cards = [
+                ("Avg Opp Rank (SOS)", sos_label, None),
+                _card("PPG",     "PPG"),
+                _card("TS%",     "TS"),
+                _card("eFG%",    "EFG"),
+                _card("USG%",    "USG"),
+                _card("AST%",    "AST_PCT"),
+                _card("OREB%",   "OR_PCT"),
+                _card("DREB%",   "DR_PCT"),
+                _card("BLK%",    "BLK_PCT"),
+                _card("STL%",    "STL_PCT"),
+                _card("FT Rate", "FTR"),
+                _card("2P%",     "TWO_P"),
+                _card("3P%",     "THREE_P"),
+                _card("FT%",     "FT_PCT"),
+            ]
+            if _has_kp:
+                cards += [
+                    _card("KP ORtg",   "ORTG_KP"),
+                    _card("KP Usage%", "USAGE_KP"),
+                ]
+            render_pct_stat_cards(cards, per_row=4)
+
+            if _split == "All Games":
+                bt_row = df_all[df_all["PLAYER"] == current_player]
+                if not bt_row.empty:
+                    d = bt_row.iloc[0]
+                    st.caption("**Model Metrics (BartTorvik · All Games only · not split-adjustable)**")
+                    st.markdown(
+                        f"OBPM **{fmt(d['OBPM'])}** · DBPM **{fmt(d['DBPM'])}** · "
+                        f"BPM **{fmt(d['BPM'])}** · PRPG **{fmt(d['PRPG'])}** · "
+                        f"MPG **{fmt(d['MPG'])}**"
+                    )
+
+        # Shot chart section — use matched team_espn_id to avoid name collisions
+        _team_id = r["team_espn_id"] if not _pbox.empty and "team_espn_id" in r.index else None
+        _shots = load_player_shots(current_player, _team_id, _max_rank)
+        if not _shots.empty:
+            st.write("**Shot Chart**")
+            _chart_title = f"{current_player}  ·  {_split}"
+            _fig = draw_shot_chart(_shots, title=_chart_title)
+            col_chart, col_gap = st.columns([3, 2])
+            with col_chart:
+                st.pyplot(_fig, use_container_width=True)
+            plt.close(_fig)
 
     st.write("***")
 
@@ -609,29 +1122,31 @@ with tab2:
     st.subheader("Database Sifting & Portal Filtering")
 
     st.write("**Competition Filter**")
-    tier_col1, tier_col2, tier_col3, _ = st.columns([1, 1, 1, 5])
-
-    if "discovery_split" not in st.session_state:
-        st.session_state.discovery_split = "All Games"
-
-    with tier_col1:
-        if st.button("All Games", key="disc_all",
-                     type="primary" if st.session_state.discovery_split == "All Games" else "secondary"):
-            st.session_state.discovery_split = "All Games"
-            st.rerun()
-    with tier_col2:
-        if st.button("Top 100", key="disc_100",
-                     type="primary" if st.session_state.discovery_split == "Top 100" else "secondary"):
-            st.session_state.discovery_split = "Top 100"
-            st.rerun()
-    with tier_col3:
-        if st.button("Top 50", key="disc_50",
-                     type="primary" if st.session_state.discovery_split == "Top 50" else "secondary"):
-            st.session_state.discovery_split = "Top 50"
-            st.rerun()
-
-    disc_split_map = {"All Games": df_all, "Top 100": df_top100, "Top 50": df_top50}
-    disc_base_df = disc_split_map[st.session_state.discovery_split]
+    _disc_split = st.radio(
+        "Discovery competition split",
+        ["All Games", "Top 100", "Top 50"],
+        horizontal=True,
+        key="discovery_split",
+        label_visibility="collapsed",
+    )
+    _disc_max_rank = 100 if _disc_split == "Top 100" else (50 if _disc_split == "Top 50" else None)
+    if _disc_max_rank is not None and _gl_ready:
+        disc_base_df = load_consistent_boxscore_stats(_disc_max_rank).rename(columns={
+            "OR_PCT": "OR", "DR_PCT": "DR", "AST_PCT": "AST",
+            "BLK_PCT": "BLK", "STL_PCT": "STL",
+        })
+        _model_cols = ["PLAYER", "CONF", "CLASS", "HEIGHT",
+                       "BPM", "OBPM", "DBPM", "PRPG", "MIN_PCT", "ORTG", "THREE_P_100"]
+        _meta = df_all[[c for c in _model_cols if c in df_all.columns]].drop_duplicates("PLAYER")
+        disc_base_df = disc_base_df.merge(_meta, on="PLAYER", how="left")
+    elif _disc_max_rank is not None and not _gl_ready:
+        st.info(
+            f"**{_disc_split} game logs not yet built.** "
+            "Run `python3 build_game_logs.py` to enable this split. Showing All Games in the meantime."
+        )
+        disc_base_df = df_all
+    else:
+        disc_base_df = df_all
 
     with st.expander("Advanced Database Filters", expanded=False):
         st.write("Adjust parameters to filter the active portal pool. Leaving fields blank or sliders at their maximum range includes all players.")
@@ -689,31 +1204,35 @@ with tab2:
     if selected_classes:
         filtered_df = filtered_df[filtered_df["CLASS"].isin(selected_classes)]
 
-    filtered_df = filtered_df[
-        (filtered_df["MIN_PCT"].between(min_pct[0], min_pct[1])) &
-        (filtered_df["BPM"].between(bpm[0], bpm[1])) &
-        (filtered_df["OBPM"].between(obpm[0], obpm[1])) &
-        (filtered_df["DBPM"].between(dbpm[0], dbpm[1])) &
-        (filtered_df["ORTG"].between(ortg[0], ortg[1])) &
-        (filtered_df["USG"].between(usg[0], usg[1])) &
-        (filtered_df["EFG"].between(efg[0], efg[1])) &
-        (filtered_df["TS"].between(ts[0], ts[1])) &
-        (filtered_df["OR"].between(orb[0], orb[1])) &
-        (filtered_df["DR"].between(drb[0], drb[1])) &
-        (filtered_df["AST"].between(ast[0], ast[1])) &
-        (filtered_df["TO"].between(tov[0], tov[1])) &
-        (filtered_df["BLK"].between(blk[0], blk[1])) &
-        (filtered_df["STL"].between(stl[0], stl[1])) &
-        (filtered_df["FTR"].between(ftr[0], ftr[1])) &
-        (filtered_df["TWO_P"].between(two_p[0], two_p[1])) &
-        (filtered_df["THREE_P"].between(three_p[0], three_p[1])) &
-        (filtered_df["THREE_P_100"].between(three_p_100[0], three_p_100[1]))
-    ]
+    def _col_filter(df, col, lo, hi):
+        return df[df[col].between(lo, hi)] if col in df.columns else df
 
-    filtered_df = filtered_df.sort_values(by="PRPG", ascending=False)
+    filtered_df = _col_filter(filtered_df, "MIN_PCT",   min_pct[0],    min_pct[1])
+    filtered_df = _col_filter(filtered_df, "BPM",       bpm[0],        bpm[1])
+    filtered_df = _col_filter(filtered_df, "OBPM",      obpm[0],       obpm[1])
+    filtered_df = _col_filter(filtered_df, "DBPM",      dbpm[0],       dbpm[1])
+    filtered_df = _col_filter(filtered_df, "ORTG",      ortg[0],       ortg[1])
+    filtered_df = _col_filter(filtered_df, "USG",       usg[0],        usg[1])
+    filtered_df = _col_filter(filtered_df, "EFG",       efg[0],        efg[1])
+    filtered_df = _col_filter(filtered_df, "TS",        ts[0],         ts[1])
+    filtered_df = _col_filter(filtered_df, "OR",        orb[0],        orb[1])
+    filtered_df = _col_filter(filtered_df, "DR",        drb[0],        drb[1])
+    filtered_df = _col_filter(filtered_df, "AST",       ast[0],        ast[1])
+    filtered_df = _col_filter(filtered_df, "TO",        tov[0],        tov[1])
+    filtered_df = _col_filter(filtered_df, "BLK",       blk[0],        blk[1])
+    filtered_df = _col_filter(filtered_df, "STL",       stl[0],        stl[1])
+    filtered_df = _col_filter(filtered_df, "FTR",       ftr[0],        ftr[1])
+    filtered_df = _col_filter(filtered_df, "TWO_P",     two_p[0],      two_p[1])
+    filtered_df = _col_filter(filtered_df, "THREE_P",   three_p[0],    three_p[1])
+    filtered_df = _col_filter(filtered_df, "THREE_P_100", three_p_100[0], three_p_100[1])
 
-    ordered_cols = ["PLAYER", "TEAM", "CONF", "CLASS", "HEIGHT", "PRPG", "BPM", "MIN_PCT", "USG", "EFG"]
-    remaining_cols = [c for c in filtered_df.columns if c not in ordered_cols]
+    sort_col = "PRPG" if "PRPG" in filtered_df.columns else "PPG" if "PPG" in filtered_df.columns else filtered_df.columns[0]
+    filtered_df = filtered_df.sort_values(by=sort_col, ascending=False)
+
+    _hidden = {"team_espn_id"}
+    ordered_cols = ["PLAYER", "TEAM", "CONF", "CLASS", "HEIGHT", "GP", "PPG", "PRPG", "BPM", "MIN_PCT", "USG", "EFG", "TS", "AST", "OR", "DR", "BLK", "STL"]
+    ordered_cols = [c for c in ordered_cols if c in filtered_df.columns]
+    remaining_cols = [c for c in filtered_df.columns if c not in ordered_cols and c not in _hidden]
     filtered_df = filtered_df[ordered_cols + remaining_cols]
 
     st.write(f"**Filter Results ({st.session_state.discovery_split}):** Found {len(filtered_df)} profiles matching criteria.")
