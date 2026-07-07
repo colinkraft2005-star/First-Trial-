@@ -1006,7 +1006,7 @@ with tab_depth:
             conn
         )
         chart_df['height'] = "—"
-    chart_df['height'] = "—"
+        
     conn.close()
 
     POSITIONS = [("PG", "Point Guard"), ("CG", "Combo Guard"), ("SF", "Small Forward"),
