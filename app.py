@@ -1,4 +1,4 @@
-import streamlit as st
+ximport streamlit as st
 import pandas as pd
 import requests
 import sqlite3
@@ -995,10 +995,17 @@ with tab_depth:
 
     # ---- VISUAL DEPTH CHART ----
     conn = sqlite3.connect('scouting_hub.db')
+    try:
     chart_df = pd.read_sql_query(
-        "SELECT player_name, position, depth, descriptor, bt_name, height, class_yr FROM roster ORDER BY depth",
+        "SELECT player_name, position, depth, descriptor, bt_name, height, class_yr FROM roster ORDER BY depth", 
         conn
     )
+except Exception as e:
+    chart_df = pd.read_sql_query(
+        "SELECT player_name, position, depth, descriptor, bt_name, class_yr FROM roster ORDER BY depth", 
+        conn
+    )
+    chart_df['height'] = "—"
     conn.close()
 
     POSITIONS = [("PG", "Point Guard"), ("CG", "Combo Guard"), ("SF", "Small Forward"),
