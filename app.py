@@ -995,16 +995,17 @@ with tab_depth:
 
     # ---- VISUAL DEPTH CHART ----
     conn = sqlite3.connect('scouting_hub.db')
-    try:
-    chart_df = pd.read_sql_query(
-        "SELECT player_name, position, depth, descriptor, bt_name, height, class_yr FROM roster ORDER BY depth", 
-        conn
-    )
-except Exception as e:
-    chart_df = pd.read_sql_query(
-        "SELECT player_name, position, depth, descriptor, bt_name, class_yr FROM roster ORDER BY depth", 
-        conn
-    )
+   try:
+        chart_df = pd.read_sql_query(
+            "SELECT player_name, position, depth, descriptor, bt_name, height, class_yr FROM roster ORDER BY depth", 
+            conn
+        )
+    except Exception:
+        chart_df = pd.read_sql_query(
+            "SELECT player_name, position, depth, descriptor, bt_name, class_yr FROM roster ORDER BY depth", 
+            conn
+        )
+        chart_df['height'] = "—"
     chart_df['height'] = "—"
     conn.close()
 
