@@ -19,7 +19,7 @@ Usage:
     caffeinate -i python3 -u build_synergy_playtypes.py 2>&1 | tee /tmp/synergy_build.log
 """
 
-import asyncio, base64, json, sqlite3, time, urllib.request, urllib.error
+import asyncio, base64, json, sqlite3, time, urllib.parse, urllib.request, urllib.error
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -60,14 +60,70 @@ def build_table(conn):
 # ── Auth ───────────────────────────────────────────────────────────────────
 bearer_holder = {"token": "", "expires_at": 0}
 
+SESSION_FILE = Path(__file__).parent / "synergy_session.json"
+
+def _refresh_token_login() -> str:
+    """
+    Use the saved OAuth refresh token to get a new bearer token via HTTP.
+    This is fast (no browser), works as long as the refresh token is valid.
+    Returns bearer string or "" on failure.
+    """
+    if not SESSION_FILE.exists():
+        return ""
+    try:
+        session = json.loads(SESSION_FILE.read_text())
+    except Exception:
+        return ""
+
+    refresh_token = session.get("refresh_token", "")
+    client_id     = session.get("client_id", "") or "client.basketball.teamsite"
+    token_url     = session.get("token_url", "") or "https://auth.synergysportstech.com/connect/token"
+
+    if not refresh_token:
+        return ""
+
+    body = urllib.parse.urlencode({
+        "grant_type":    "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id":     client_id,
+    }).encode()
+    req = urllib.request.Request(token_url, data=body, headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent":   "Mozilla/5.0",
+    }, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read())
+            access_token  = resp.get("access_token", "")
+            new_refresh   = resp.get("refresh_token", "")
+            if access_token:
+                # Persist the rotated refresh token if the server sent a new one
+                if new_refresh and new_refresh != refresh_token:
+                    session["refresh_token"] = new_refresh
+                    SESSION_FILE.write_text(json.dumps(session, indent=2))
+                return f"Bearer {access_token}"
+    except Exception as ex:
+        print(f"  [auth] Refresh token HTTP error: {ex}")
+    return ""
+
+
 async def login():
-    """Login via Playwright and return fresh bearer token."""
+    """
+    Refresh bearer token using the saved browser session (no 2FA required).
+    Run synergy_setup_auth.py once to create synergy_session.json.
+    """
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context(
+
+        # Load saved session if available (bypasses 2FA)
+        ctx_kwargs = dict(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
             ignore_https_errors=True,
         )
+        if SESSION_FILE.exists():
+            ctx_kwargs["storage_state"] = str(SESSION_FILE)
+
+        ctx = await browser.new_context(**ctx_kwargs)
         page = await ctx.new_page()
         tok_holder = {"t": ""}
 
@@ -81,16 +137,13 @@ async def login():
             await page.goto(f"{APP_URL}/basketball/players?leagueId={LEAGUE}&seasonId={SEASON}",
                             wait_until="domcontentloaded", timeout=20000)
         except: pass
-        await page.wait_for_timeout(1500)
-        for s in ['input[placeholder*="user" i]', 'input[type="email"]']:
-            if await page.locator(s).count(): await page.fill(s, USERNAME); break
-        for s in ['input[type="password"]']:
-            if await page.locator(s).count(): await page.fill(s, PASSWORD); break
-        for s in ['button[type="submit"]', 'button:has-text("Login")']:
-            if await page.locator(s).count(): await page.click(s); break
-        try: await page.wait_for_url(f"{APP_URL}/**", timeout=15000)
-        except: pass
-        await page.wait_for_timeout(2000)
+
+        # Poll up to 10 seconds for an authenticated API call to fire
+        for _ in range(20):
+            if tok_holder["t"]:
+                break
+            await page.wait_for_timeout(500)
+
         await browser.close()
         return tok_holder["t"]
 
@@ -98,10 +151,26 @@ def get_bearer():
     if bearer_holder["token"] and time.time() < bearer_holder["expires_at"] - 30:
         return bearer_holder["token"]
     print("  [auth] Refreshing bearer token…")
-    tok = asyncio.run(login())
+
+    # Fast path: OAuth refresh token (no browser required)
+    tok = _refresh_token_login()
+    if tok:
+        print(f"  [auth] Token refreshed via refresh_token: {tok[:60]}…")
+        bearer_holder["token"] = tok
+        bearer_holder["expires_at"] = time.time() + 570
+        return tok
+
+    # Slow path: Playwright browser (requires valid session cookies)
+    print("  [auth] Refresh token failed, falling back to Playwright…")
+    for attempt in range(3):
+        tok = asyncio.run(login())
+        if tok:
+            break
+        print(f"  [auth] Empty token on attempt {attempt+1}, retrying…")
+        time.sleep(3)
     bearer_holder["token"] = tok
-    bearer_holder["expires_at"] = time.time() + 570   # ~9.5 min
-    print(f"  [auth] Token refreshed: {tok[:60]}…")
+    bearer_holder["expires_at"] = time.time() + 570
+    print(f"  [auth] Token refreshed via Playwright: {tok[:60]}…")
     return tok
 
 def http_post(url, body, bearer):
@@ -112,11 +181,12 @@ def http_post(url, body, bearer):
         "User-Agent": "Mozilla/5.0",
     }, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=60) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         return e.code, {}
-    except Exception:
+    except Exception as ex:
+        print(f"  [http_post] error: {ex}")
         return 0, {}
 
 def http_get(url, bearer):
@@ -165,8 +235,11 @@ def get_all_players():
             pid = item.get("id", "")
             name = (item.get("name") or
                     f"{item.get('firstName','')} {item.get('lastName','')}".strip())
-            team = (item.get("team") or {}).get("name", "")
-            tid  = (item.get("team") or {}).get("id", "")
+            # Team info is inside boxscore[0]["team"], not at the player level
+            boxscore = item.get("boxscore", [])
+            team_obj = boxscore[0].get("team", {}) if boxscore else {}
+            team = team_obj.get("fullName", team_obj.get("name", ""))
+            tid  = team_obj.get("id", "")
             if pid:
                 players[pid] = {"name": name, "team": team, "team_id": tid}
 

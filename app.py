@@ -28,7 +28,98 @@ try:
 except AttributeError:
     pass
 
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="UCLA Basketball", page_icon="🏀")
+
+# ==========================================
+# GLOBAL CSS — remove Streamlit whitespace + style header
+# ==========================================
+st.markdown("""
+<style>
+/* Kill all Streamlit default chrome and whitespace */
+[data-testid="stHeader"] { display: none !important; }
+[data-testid="stToolbar"] { display: none !important; }
+[data-testid="stDecoration"] { display: none !important; }
+section[data-testid="stMain"] > div { padding-top: 0 !important; }
+.block-container {
+    padding-top: 0 !important;
+    padding-left: 3rem !important;
+    padding-right: 3rem !important;
+    padding-bottom: 2rem !important;
+    max-width: 100% !important;
+}
+
+/* UCLA header bar — negative margins bleed past block-container padding */
+#ucla-header {
+    background: #2774AE;
+    padding: 10px 3rem;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: calc(100% + 6rem);
+    box-sizing: border-box;
+    margin-left: -3rem;
+    margin-right: -3rem;
+    position: sticky;
+    top: 0;
+    z-index: 9999;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+}
+#ucla-header img { height: 48px; width: auto; }
+#ucla-header-title {
+    color: white;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
+
+/* Tab bar — negative margins bleed past block-container padding */
+[data-testid="stTabs"] { margin-top: 0 !important; }
+[data-baseweb="tab-list"] {
+    background: #2774AE !important;
+    padding: 0 3rem !important;
+    gap: 0 !important;
+    width: calc(100% + 6rem) !important;
+    margin-left: -3rem !important;
+    border-bottom: none !important;
+    box-sizing: border-box !important;
+}
+[data-baseweb="tab"] {
+    color: rgba(255,255,255,0.7) !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    padding: 10px 18px !important;
+    border-radius: 0 !important;
+    border-bottom: 3px solid transparent !important;
+    background: transparent !important;
+}
+[data-baseweb="tab"]:hover {
+    color: white !important;
+    background: rgba(0,0,0,0.12) !important;
+}
+[aria-selected="true"][data-baseweb="tab"] {
+    color: #FFD100 !important;
+    border-bottom: 3px solid #FFD100 !important;
+    background: rgba(0,0,0,0.15) !important;
+}
+[data-testid="stTabPanel"] {
+    padding-top: 1rem !important;
+}
+
+/* Collapse spacing between depth chart cards */
+[data-testid="stColumn"] .element-container {
+    margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+[data-testid="stColumn"] iframe {
+    display: block !important;
+    margin: 0 !important;
+}
+[data-testid="stColumn"] [data-testid="stVerticalBlock"] {
+    gap: 4px !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # ==========================================
@@ -217,6 +308,8 @@ def fetch_barttorvik_safe(top_filter=None, retries=3, delay_between_requests=4):
                         "MIN_PCT":     safe_float(row, 4),
                         "MPG":         safe_float(row, 54),
                         "PPG":         safe_float(row, 63) if len(row) > 63 else 0.0,
+                        "APG":         safe_float(row, 60) if len(row) > 60 else 0.0,
+                        "RPG":         safe_float(row, 59) if len(row) > 59 else 0.0,
                         "ORTG":        safe_float(row, 5),
                         "USG":         safe_float(row, 6),
                         "EFG":         safe_float(row, 7),
@@ -260,9 +353,8 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
     """
     try:
         conn = sqlite3.connect("scouting_hub.db")
-        # Use KenPom rank if available, fall back to BartTorvik rank
         if max_opp_rank:
-            where = f"AND COALESCE(p.kp_opp_rank, p.opp_rank) <= {int(max_opp_rank)}"
+            where = f"AND CAST(p.opp_rank AS INTEGER) <= {int(max_opp_rank)} AND CAST(p.opp_rank AS INTEGER) < 999"
         else:
             where = ""
         df = pd.read_sql_query(f"""
@@ -313,7 +405,7 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
             ) tm ON tm.team_espn_id = p.team_espn_id AND tm.game_date = p.game_date
             WHERE p.min_played >= 1 {where}
             GROUP BY p.player_name, p.team_espn_id
-            HAVING COUNT(*) >= 3
+            HAVING COUNT(*) >= 1
         """, conn)
         conn.close()
         return df
@@ -690,17 +782,18 @@ all_player_names = sorted(list(df_all["PLAYER"].unique()))
 
 if "active_player" not in st.session_state:
     st.session_state.active_player = all_player_names[0]
+if "go_to_profile" not in st.session_state:
+    st.session_state.go_to_profile = False
 
 # ==========================================
 # HEADER
 # ==========================================
-head_col1, head_col2 = st.columns([1, 12])
-with head_col1:
-    st.image("https://cdn.freebiesupply.com/logos/large/2x/ucla-bruins-1-logo-png-transparent.png", width=55)
-with head_col2:
-    st.markdown("<h2 style='margin: 0; padding-top: 8px; color: #FFFFFF;'>UCLA Transfer Portal Database</h2>",
-                unsafe_allow_html=True)
-st.write("***")
+st.markdown("""
+<div id="ucla-header">
+  <img src="https://cdn.freebiesupply.com/logos/large/2x/ucla-bruins-1-logo-png-transparent.png" alt="UCLA Logo">
+  <div id="ucla-header-title">UCLA Basketball Analytics</div>
+</div>
+""", unsafe_allow_html=True)
 
 tab_depth, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Depth Chart",
@@ -711,37 +804,169 @@ tab_depth, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Player Card / Ranking System"
 ])
 
-# Inject JS to restore last active tab via localStorage and track future tab clicks.
 import streamlit.components.v1 as components
-components.html("""
+_go_to_profile = st.session_state.go_to_profile
+if _go_to_profile:
+    st.session_state.go_to_profile = False
+
+components.html(f"""
 <script>
-(function() {
-    var savedTab = parseInt(localStorage.getItem('uclaActiveTab') || '0');
+(function() {{
+    var goToProfile = {'true' if _go_to_profile else 'false'};
+    var savedTab = goToProfile ? 1 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
 
-    function attachListeners(tabs) {
-        tabs.forEach(function(tab, i) {
-            tab.addEventListener('click', function() {
+    function attachListeners(tabs) {{
+        tabs.forEach(function(tab, i) {{
+            tab.addEventListener('click', function() {{
                 localStorage.setItem('uclaActiveTab', i);
-            });
-        });
-    }
+            }});
+        }});
+    }}
 
-    function tryRestore() {
+    function tryRestore() {{
         var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-        if (tabs.length >= 6) {
+        if (tabs.length >= 6) {{
             attachListeners(tabs);
-            if (savedTab > 0) {
+            if (savedTab > 0) {{
                 tabs[savedTab].click();
-            }
-        } else {
+                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '1'); }}
+            }}
+        }} else {{
             setTimeout(tryRestore, 100);
-        }
-    }
+        }}
+    }}
 
     setTimeout(tryRestore, 150);
-})();
+
+    // Listen for depth chart card clicks from card iframes (only register once)
+    if (!window.parent._dcListenerAttached) {{
+        window.parent._dcListenerAttached = true;
+        try {{
+            window.parent.addEventListener('message', function(evt) {{
+                if (evt.data && evt.data.type === 'dc_click') {{
+                    var playerKey = evt.data.key;
+                    var btns = window.parent.document.querySelectorAll('button');
+                    for (var i = 0; i < btns.length; i++) {{
+                        if (btns[i].textContent.trim() === playerKey) {{
+                            btns[i].click();
+                            break;
+                        }}
+                    }}
+                }}
+            }});
+        }} catch(e) {{ console.warn('postMessage listener failed:', e); }}
+    }}
+}})();
 </script>
 """, height=0, width=0)
+
+# ==========================================
+# LINEUP ANALYZER — helpers (used in depth chart tab)
+# ==========================================
+@st.cache_data(ttl=3600)
+def load_lineup_segments() -> pd.DataFrame:
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query("SELECT * FROM lineup_segments", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+LINEUP_RANGES = {
+    "ortg":        (85,  125, True),
+    "ts":          (42,   70, True),
+    "three_pct":   (25,   48, True),
+    "three_rate":  (20,   55, True),
+    "ft_rate":     (10,   50, True),
+    "tov_rate":    (10,   30, False),
+    "drtg":        (85,  125, False),
+    "opp_ts":      (42,   70, False),
+    "opp_tov_rate":(5,    25, True),
+    "drb_pct":     (55,   90, True),
+    "orb_pct":     (15,   45, True),
+    "net_rtg":     (-25,  25, True),
+}
+
+def lineup_pct(key, value):
+    if key not in LINEUP_RANGES:
+        return None
+    lo, hi, higher_good = LINEUP_RANGES[key]
+    if hi == lo:
+        return 50.0
+    raw = (value - lo) / (hi - lo)
+    raw = max(0.0, min(1.0, raw))
+    return (raw * 100) if higher_good else ((1 - raw) * 100)
+
+
+def compute_lineup_stats_from_segments(players: list, segs: pd.DataFrame):
+    """
+    Sum across all lineup_segments that contain every player in `players`.
+    Returns a stats dict or None.
+    """
+    if segs.empty or not players:
+        return None
+
+    mask = pd.Series([True] * len(segs), index=segs.index)
+    for p in players:
+        player_mask = (
+            (segs["p1"] == p) | (segs["p2"] == p) | (segs["p3"] == p) |
+            (segs["p4"] == p) | (segs["p5"] == p)
+        )
+        mask = mask & player_mask
+
+    sub = segs[mask]
+    if sub.empty:
+        return None
+
+    mins   = sub["seconds"].sum() / 60
+    t_pts  = sub["team_pts"].sum()
+    o_pts  = sub["opp_pts"].sum()
+    t_fga  = sub["team_fga"].sum()
+    t_fgm  = sub["team_fgm"].sum()
+    t_fg3a = sub["team_fg3a"].sum()
+    t_fg3m = sub["team_fg3m"].sum()
+    t_fta  = sub["team_fta"].sum()
+    t_ftm  = sub["team_ftm"].sum()
+    t_orb  = sub["team_orb"].sum()
+    t_drb  = sub["team_drb"].sum()
+    t_tov  = sub["team_tov"].sum()
+    o_fga  = sub["opp_fga"].sum()
+    o_fg3a = sub["opp_fg3a"].sum()
+    o_tov  = sub["opp_tov"].sum()
+    o_orb  = sub["opp_orb"].sum()
+    o_drb  = sub["opp_drb"].sum()
+
+    # Possession estimate (Dean Oliver): FGA + 0.44*FTA + TOV - ORB
+    t_poss = t_fga + 0.44 * t_fta + t_tov - t_orb
+    o_poss = o_fga + 0.44 * sub["opp_fta"].sum() + o_tov - o_orb
+    poss   = (t_poss + o_poss) / 2  # use average per convention
+
+    def safe(n, d): return round(n / d * 100, 1) if d > 0 else 0.0
+
+    return {
+        "minutes":    round(mins, 1),
+        "segments":   len(sub),
+        "games":      sub["game_date"].nunique(),
+        "net_rtg":    round((t_pts - o_pts) / poss * 100, 1) if poss else 0,
+        "ortg":       round(t_pts / poss * 100, 1) if poss else 0,
+        "drtg":       round(o_pts / poss * 100, 1) if poss else 0,
+        "ts":         safe(t_pts, 2 * (t_fga + 0.44 * t_fta)),
+        "efg":        safe(t_fgm + 0.5 * t_fg3m, t_fga),
+        "three_pct":  safe(t_fg3m, t_fg3a),
+        "three_rate": safe(t_fg3a, t_fga),
+        "ft_rate":    safe(t_fta, t_fga),
+        "tov_rate":   round(t_tov / t_poss * 100, 1) if t_poss else 0,
+        "orb_pct":    safe(t_orb, t_orb + o_drb),
+        "drb_pct":    safe(t_drb, t_drb + o_orb),
+        "opp_ts":     safe(o_pts, 2 * (o_fga + 0.44 * sub["opp_fta"].sum())),
+        "opp_efg":    safe(sub["opp_fgm"].sum() + 0.5 * o_fg3a, o_fga),
+        "opp_tov_rate": round(o_tov / o_poss * 100, 1) if o_poss else 0,
+        "pts_per_min": round(t_pts / mins, 2) if mins else 0,
+        "opp_per_min": round(o_pts / mins, 2) if mins else 0,
+    }
+
 
 # ==========================================
 # TAB: DEPTH CHART (FRONT PAGE)
@@ -749,12 +974,464 @@ components.html("""
 with tab_depth:
     st.subheader("26-27 UCLA Bruins — Depth Chart")
 
-    # ---- ROSTER EDITOR ----
+    # ---- Load real per-game APG/RPG from game logs ----
+    _pg_stats = {}
+    try:
+        _pg_conn = sqlite3.connect("scouting_hub.db")
+        _pg_rows = _pg_conn.execute("""
+            SELECT player_name,
+                   ROUND(AVG(pts), 1) AS ppg,
+                   ROUND(AVG(ast), 1) AS apg,
+                   ROUND(AVG(reb), 1) AS rpg
+            FROM player_game_logs
+            WHERE team_name = 'UCLA Bruins'
+            GROUP BY player_name
+        """).fetchall()
+        _pg_conn.close()
+        for row in _pg_rows:
+            _pg_stats[row[0]] = {"ppg": row[1], "apg": row[2], "rpg": row[3]}
+    except Exception:
+        pass
+
+    # ---- VISUAL DEPTH CHART ----
+    conn = sqlite3.connect('scouting_hub.db')
+    chart_df = pd.read_sql_query(
+        "SELECT player_name, position, depth, descriptor, bt_name, height, class_yr FROM roster ORDER BY depth",
+        conn
+    )
+    conn.close()
+
+    POSITIONS = [("PG", "Point Guard"), ("CG", "Combo Guard"), ("SF", "Small Forward"),
+                 ("PF", "Power Forward"), ("C", "Center")]
+
+    pos_cols = st.columns(5)
+
+    for i, (pos_code, pos_label) in enumerate(POSITIONS):
+        with pos_cols[i]:
+            st.markdown(f"""
+                <div style='background-color:#2774AE; color:white; font-weight:bold;
+                            text-align:center; padding:8px; border-radius:6px; margin-bottom:10px;
+                            font-size:13px; letter-spacing:0.5px;'>
+                    {pos_code}<br><span style='font-size:9px; font-weight:400; opacity:0.85;'>{pos_label}</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+            group = chart_df[chart_df["position"] == pos_code].sort_values("depth")
+
+            if group.empty:
+                continue
+
+            for _, pl in group.iterrows():
+                pname = pl["player_name"]
+                descriptor = pl["descriptor"] if pl["descriptor"] else ""
+                bt_name = pl["bt_name"] if pl["bt_name"] else ""
+                roster_ht = pl["height"] if pl.get("height") else ""
+                roster_cl = pl["class_yr"] if pl.get("class_yr") else ""
+                is_open = pname.strip().upper() == "OPEN"
+                is_starter = int(pl["depth"]) == 1
+
+                if is_open:
+                    st.markdown(
+                        "<div style=\"border:2px dashed #FFD100;border-radius:8px;padding:12px 10px;"
+                        "margin-bottom:8px;background-color:rgba(255,209,0,0.06);text-align:center;\">"
+                        "<div style=\"font-size:13px;font-weight:bold;color:#FFD100;\">OPEN</div>"
+                        "<div style=\"font-size:10px;color:#FFD100;opacity:0.85;margin-top:2px;\">" + descriptor + "</div>"
+                        "</div>",
+                        unsafe_allow_html=True
+                    )
+                    continue
+
+                border = "#FFD100" if is_starter else "#CBD5E1"
+                starter_badge = (
+                    "<span style=\"font-size:8px;background:#FFD100;color:#0F172A;"
+                    "font-weight:bold;padding:1px 5px;border-radius:3px;margin-left:4px;\">S</span>"
+                ) if is_starter else ""
+
+                stat_grid = ""
+                height_class = ""
+                pg = _pg_stats.get(pname, {})
+
+                if bt_name:
+                    bt_match = df_all[df_all["PLAYER"] == bt_name]
+                    if not bt_match.empty:
+                        s = bt_match.iloc[0]
+                        ppg_v = f"{pg['ppg']:.1f}" if pg.get('ppg') is not None else f"{s['PPG']:.1f}"
+                        apg_v = f"{pg['apg']:.1f}" if pg.get('apg') is not None else (f"{s['APG']:.1f}" if s.get('APG', 0) else "—")
+                        rpg_v = f"{pg['rpg']:.1f}" if pg.get('rpg') is not None else (f"{s['RPG']:.1f}" if s.get('RPG', 0) else "—")
+                        usg_v = f"{s['USG']:.0f}%" if s.get('USG', 0) else "—"
+                        bpm_v = f"{s['BPM']:+.1f}" if s.get('BPM', 0) else "—"
+                        ts_v  = f"{s['TS']:.0f}%"  if s.get('TS', 0)  else "—"
+                        stat_grid = (
+                            "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:3px 6px;"
+                            "margin:6px 0 4px 0;'>"
+                            + "".join(
+                                f"<div style='text-align:center;'>"
+                                f"<div style='font-size:13px;font-weight:700;color:#0F172A;line-height:1.1;'>{v}</div>"
+                                f"<div style='font-size:8px;color:#64748B;letter-spacing:0.3px;'>{l}</div>"
+                                f"</div>"
+                                for l, v in [("PPG", ppg_v), ("APG", apg_v), ("RPG", rpg_v),
+                                             ("USG", usg_v), ("BPM", bpm_v), ("TS%", ts_v)]
+                            )
+                            + "</div>"
+                        )
+                        ht = s.get('HEIGHT', '') or ''
+                        cl = s.get('CLASS', '') or ''
+                        if ht or cl:
+                            height_class = (
+                                f"<div style='font-size:9px;color:#94a3b8;margin-top:2px;'>"
+                                f"{ht}{'  ·  ' if ht and cl else ''}{cl}</div>"
+                            )
+                elif pg:
+                    # In game logs but no BartTorvik — show what we have
+                    ppg_v = f"{pg['ppg']:.1f}"
+                    apg_v = f"{pg['apg']:.1f}"
+                    rpg_v = f"{pg['rpg']:.1f}"
+                    stat_grid = (
+                        "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:3px 6px;"
+                        "margin:6px 0 4px 0;'>"
+                        + "".join(
+                            f"<div style='text-align:center;'>"
+                            f"<div style='font-size:13px;font-weight:700;color:#0F172A;line-height:1.1;'>{v}</div>"
+                            f"<div style='font-size:8px;color:#64748B;letter-spacing:0.3px;'>{l}</div>"
+                            f"</div>"
+                            for l, v in [("PPG", ppg_v), ("APG", apg_v), ("RPG", rpg_v),
+                                         ("USG", "—"), ("BPM", "—"), ("TS%", "—")]
+                        )
+                        + "</div>"
+                    )
+                    if roster_ht or roster_cl:
+                        height_class = (
+                            f"<div style='font-size:9px;color:#94a3b8;margin-top:2px;'>"
+                            f"{roster_ht}{'  ·  ' if roster_ht and roster_cl else ''}{roster_cl}</div>"
+                        )
+                else:
+                    # No BartTorvik, no game logs — show height/class from roster if available
+                    if roster_ht or roster_cl:
+                        height_class = (
+                            f"<div style='font-size:9px;color:#94a3b8;margin-top:4px;'>"
+                            f"{roster_ht}{'  ·  ' if roster_ht and roster_cl else ''}{roster_cl}</div>"
+                        )
+
+                is_clickable = bt_name and not df_all[df_all["PLAYER"] == bt_name].empty
+
+                card_inner = (
+                    "<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                    f"<span style='font-size:13px;font-weight:700;color:#0F172A;'>{pname}</span>"
+                    + starter_badge + "</div>"
+                    + stat_grid + height_class
+                )
+
+                card_style = (
+                    f"border:1px solid {border};border-left:4px solid {border};"
+                    f"border-radius:6px;padding:10px 10px 8px;"
+                    f"background:#FFFFFF;box-shadow:1px 1px 3px rgba(0,0,0,0.05);"
+                    + ("cursor:pointer;" if is_clickable else "")
+                )
+
+                if is_clickable:
+                    import re as _re
+                    card_key = _re.sub(r'[^a-zA-Z0-9_]', '', f"dc_{pos_code}_{pname.replace(' ', '_')}")
+                    btn_trigger = f"__dc__{card_key}"
+                    card_height = (130 if height_class else 118) if stat_grid else 46
+                    components.html(f"""
+<style>
+  body {{ margin:0; padding:0; overflow:hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+  .card {{
+    border: 1px solid {border};
+    border-left: 4px solid {border};
+    border-radius: 6px;
+    padding: 10px 10px 8px;
+    background: #FFFFFF;
+    box-shadow: 1px 1px 3px rgba(0,0,0,0.05);
+    cursor: pointer;
+    user-select: none;
+  }}
+  .card:hover {{ background: #f8fafc; }}
+</style>
+<div class="card" onclick="window.parent.postMessage({{type:'dc_click',key:'{btn_trigger}'}}, '*')">
+  {card_inner}
+</div>
+""", height=card_height, scrolling=False)
+                    # Hidden trigger button — zero height, caught by postMessage listener
+                    st.markdown(f"""
+<div id="dc-hide-{card_key}"></div>
+<style>
+div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-testid="stButton"] {{
+    height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+                    clicked = st.button(btn_trigger, key=card_key)
+                    if clicked:
+                        st.session_state.active_player = bt_name
+                        st.session_state.go_to_profile = True
+                        st.rerun()
+                else:
+                    st.markdown(
+                        f"<div style='{card_style};margin-bottom:8px;'>{card_inner}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+    st.divider()
+
+    # ==========================================
+    # LINEUP ANALYZER
+    # ==========================================
+    st.markdown("#### Lineup Combination Analyzer")
+    st.caption(
+        "Select any 2–5 players to see the team's offensive and defensive performance while on the court together."
+    )
+
+    _segs = load_lineup_segments()
+    _seg_players = []
+    if not _segs.empty:
+        all_mentioned = pd.concat([
+            _segs["p1"], _segs["p2"], _segs["p3"], _segs["p4"], _segs["p5"]
+        ]).dropna().unique().tolist()
+        _seg_players = sorted(all_mentioned)
+
+    if not _seg_players:
+        st.info("No lineup segment data found. Run `python3 build_lineup_segments.py` first.")
+    else:
+        selected_lineup = st.multiselect(
+            "Select players:",
+            options=_seg_players,
+            default=[],
+            placeholder="Search players...",
+            label_visibility="collapsed",
+        )
+
+        if len(selected_lineup) >= 2:
+            stats = compute_lineup_stats_from_segments(selected_lineup, _segs)
+
+            if stats is None:
+                st.warning("No lineup segments found with all selected players on the floor.")
+            else:
+                mins = stats["minutes"]
+                segs = stats["segments"]
+                games = stats["games"]
+                net = stats["net_rtg"]
+                net_color = "#16a34a" if net >= 0 else "#dc2626"
+                net_sign  = "+" if net >= 0 else ""
+
+                st.markdown(
+                    f"<div style='font-size:13px;color:#64748B;margin-bottom:14px;'>"
+                    f"<b>{mins:.0f} minutes</b> together across {segs} stints / {games} game{'s' if games!=1 else ''} · "
+                    f"<span style='color:{net_color};font-weight:700;'>Net {net_sign}{net:.1f}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                def lu_card(col_obj, key, display_val, label):
+                    pct = lineup_pct(key, stats[key])
+                    bg, fg = pct_color(pct)
+                    col_obj.markdown(
+                        f"<div style='background:{bg};border-radius:8px;padding:12px 6px;text-align:center;'>"
+                        f"<div style='font-size:20px;font-weight:700;color:{fg};line-height:1;'>{display_val}</div>"
+                        f"<div style='font-size:9px;color:{fg};opacity:0.8;margin-top:4px;letter-spacing:0.3px;'>{label}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                st.markdown("<div style='font-size:10px;font-weight:700;color:#2774AE;letter-spacing:0.8px;margin-bottom:6px;'>OFFENSE</div>", unsafe_allow_html=True)
+                c1, c2, c3, c4, c5 = st.columns(5)
+                lu_card(c1, "ortg",       f"{stats['ortg']:.1f}",       "Off Rtg")
+                lu_card(c2, "ts",         f"{stats['ts']:.1f}%",        "TS%")
+                lu_card(c3, "three_pct",  f"{stats['three_pct']:.1f}%", "3P%")
+                lu_card(c4, "three_rate", f"{stats['three_rate']:.1f}%","3P Rate")
+                lu_card(c5, "tov_rate",   f"{stats['tov_rate']:.1f}%",  "TOV%")
+
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+                st.markdown("<div style='font-size:10px;font-weight:700;color:#64748B;letter-spacing:0.8px;margin-bottom:6px;'>DEFENSE & REBOUNDING</div>", unsafe_allow_html=True)
+                d1, d2, d3, d4, d5 = st.columns(5)
+                lu_card(d1, "drtg",         f"{stats['drtg']:.1f}",         "Def Rtg")
+                lu_card(d2, "opp_ts",       f"{stats['opp_ts']:.1f}%",      "Opp TS%")
+                lu_card(d3, "opp_tov_rate", f"{stats['opp_tov_rate']:.1f}%","Opp TOV%")
+                lu_card(d4, "drb_pct",      f"{stats['drb_pct']:.1f}%",     "DReb%")
+                lu_card(d5, "orb_pct",      f"{stats['orb_pct']:.1f}%",     "OReb%")
+
+    st.divider()
+
+    # ==========================================
+    # MOST COMMON 5-MAN LINEUPS
+    # ==========================================
+    st.markdown("#### Most Used 5-Man Lineups")
+
+    @st.cache_data(ttl=3600)
+    def load_top_lineups(min_minutes: float = 5.0, top_n: int = 12):
+        try:
+            conn = sqlite3.connect("scouting_hub.db")
+            df = pd.read_sql_query(
+                "SELECT p1,p2,p3,p4,p5,seconds,"
+                "team_pts,opp_pts,team_fga,team_fgm,team_fg3a,team_fg3m,"
+                "team_fta,team_ftm,team_tov,team_orb,team_drb,"
+                "opp_fga,opp_fgm,opp_fg3a,opp_fg3m,opp_fta,opp_tov,opp_orb,opp_drb "
+                "FROM lineup_segments",
+                conn,
+            )
+            conn.close()
+        except Exception:
+            return pd.DataFrame()
+
+        df = df.dropna(subset=["p1","p2","p3","p4","p5"])
+
+        # Canonical sorted lineup key
+        df["lineup_key"] = df[["p1","p2","p3","p4","p5"]].apply(
+            lambda r: tuple(sorted(r)), axis=1
+        )
+
+        agg = df.groupby("lineup_key").agg(
+            seconds    =("seconds",    "sum"),
+            segs       =("seconds",    "count"),
+            team_pts   =("team_pts",   "sum"),
+            opp_pts    =("opp_pts",    "sum"),
+            team_fga   =("team_fga",   "sum"),
+            team_fgm   =("team_fgm",   "sum"),
+            team_fg3a  =("team_fg3a",  "sum"),
+            team_fg3m  =("team_fg3m",  "sum"),
+            team_fta   =("team_fta",   "sum"),
+            team_tov   =("team_tov",   "sum"),
+            team_orb   =("team_orb",   "sum"),
+            team_drb   =("team_drb",   "sum"),
+            opp_fga    =("opp_fga",    "sum"),
+            opp_fgm    =("opp_fgm",    "sum"),
+            opp_fg3a   =("opp_fg3a",   "sum"),
+            opp_fg3m   =("opp_fg3m",   "sum"),
+            opp_fta    =("opp_fta",    "sum"),
+            opp_tov    =("opp_tov",    "sum"),
+            opp_orb    =("opp_orb",    "sum"),
+            opp_drb    =("opp_drb",    "sum"),
+        ).reset_index()
+
+        agg["mins"] = agg["seconds"] / 60
+        agg = agg[agg["mins"] >= min_minutes].sort_values("mins", ascending=False).head(top_n)
+
+        rows = []
+        for _, r in agg.iterrows():
+            t_poss = r.team_fga + 0.44*r.team_fta + r.team_tov - r.team_orb
+            o_poss = r.opp_fga  + 0.44*r.opp_fta  + r.opp_tov  - r.opp_orb
+            poss   = (t_poss + o_poss) / 2 if (t_poss + o_poss) > 0 else 1
+            ortg   = round(r.team_pts / poss * 100, 1)
+            drtg   = round(r.opp_pts  / poss * 100, 1)
+            net    = round(ortg - drtg, 1)
+            ts_denom = 2 * (r.team_fga + 0.44 * r.team_fta)
+            ts     = round(r.team_pts / ts_denom * 100, 1) if ts_denom > 0 else 0.0
+            three_pct = round(r.team_fg3m / r.team_fg3a * 100, 1) if r.team_fg3a > 0 else 0.0
+            tov_rate  = round(r.team_tov  / t_poss * 100, 1)      if t_poss > 0 else 0.0
+            opp_ts_denom = 2 * (r.opp_fga + 0.44 * r.opp_fta)
+            opp_ts   = round(r.opp_pts / opp_ts_denom * 100, 1) if opp_ts_denom > 0 else 0.0
+            opp_tov  = round(r.opp_tov / o_poss * 100, 1) if o_poss > 0 else 0.0
+            drb_pct  = round(r.team_drb / (r.team_drb + r.opp_orb) * 100, 1) if (r.team_drb + r.opp_orb) > 0 else 0.0
+            rows.append({
+                "Lineup":    " · ".join(r.lineup_key),
+                "Min":       round(r.mins, 1),
+                "Net":       net,
+                "Off Rtg":   ortg,
+                "TS%":       ts,
+                "3P%":       three_pct,
+                "TOV%":      tov_rate,
+                "Def Rtg":   drtg,
+                "Opp TS%":   opp_ts,
+                "Opp TOV%":  opp_tov,
+                "DReb%":     drb_pct,
+            })
+        return pd.DataFrame(rows)
+
+    _top_lu = load_top_lineups()
+
+    if _top_lu.empty:
+        st.info("No lineup segment data found.")
+    else:
+        def color_net(val):
+            if val > 5:   return "background:#d1fae5;color:#065f46;font-weight:700;"
+            if val < -5:  return "background:#fee2e2;color:#991b1b;font-weight:700;"
+            return "color:#374151;font-weight:600;"
+
+        def color_stat(val, key):
+            pct = lineup_pct(key, val)
+            bg, fg = pct_color(pct)
+            return f"background:{bg};color:{fg};font-weight:700;"
+
+        # Render as styled HTML table
+        th = "padding:6px 8px;text-align:center;font-size:10px;color:#64748b;letter-spacing:0.5px;font-weight:700;"
+        th_l = "padding:6px 10px;text-align:left;font-size:10px;color:#64748b;letter-spacing:0.5px;font-weight:700;"
+
+        def sec_header(label, colspan):
+            return f"<th colspan='{colspan}' style='{th}border-bottom:1px solid #e2e8f0;'>{label}</th>"
+
+        rows_html = ""
+        for _, row in _top_lu.iterrows():
+            net_s    = f"{row['Net']:+.1f}"
+            net_c    = color_net(row["Net"])
+            ortg_c   = color_stat(row["Off Rtg"],  "ortg")
+            ts_c     = color_stat(row["TS%"],       "ts")
+            tp_c     = color_stat(row["3P%"],       "three_pct")
+            tov_c    = color_stat(row["TOV%"],      "tov_rate")
+            drtg_c   = color_stat(row["Def Rtg"],   "drtg")
+            opp_ts_c = color_stat(row["Opp TS%"],   "opp_ts")
+            opp_tv_c = color_stat(row["Opp TOV%"],  "opp_tov_rate")
+            drb_c    = color_stat(row["DReb%"],      "drb_pct")
+
+            def _short_name(full):
+                parts = full.split()
+                if len(parts) >= 2 and parts[-1].lower() in ("jr.", "jr", "ii", "iii", "iv"):
+                    return " ".join(parts[-2:])
+                return parts[-1] if parts else full
+            names = [_short_name(n) for n in row["Lineup"].split(" · ")]
+            lineup_str = " · ".join(names)
+            td = "padding:7px 8px;text-align:center;font-size:12px;"
+            rows_html += (
+                f"<tr style='border-bottom:1px solid #f1f5f9;'>"
+                f"<td style='padding:7px 10px;font-size:12px;color:#0f172a;white-space:nowrap;'>{lineup_str}</td>"
+                f"<td style='{td}color:#64748b;'>{row['Min']:.0f}</td>"
+                f"<td style='{td}{net_c}'>{net_s}</td>"
+                f"<td style='{td}{ortg_c}'>{row['Off Rtg']}</td>"
+                f"<td style='{td}{ts_c}'>{row['TS%']}%</td>"
+                f"<td style='{td}{tp_c}'>{row['3P%']}%</td>"
+                f"<td style='{td}{tov_c}'>{row['TOV%']}%</td>"
+                f"<td style='{td}{drtg_c}'>{row['Def Rtg']}</td>"
+                f"<td style='{td}{opp_ts_c}'>{row['Opp TS%']}%</td>"
+                f"<td style='{td}{opp_tv_c}'>{row['Opp TOV%']}%</td>"
+                f"<td style='{td}{drb_c}'>{row['DReb%']}%</td>"
+                f"</tr>"
+            )
+
+        st.markdown(
+            f"""<table style='width:100%;border-collapse:collapse;font-family:sans-serif;'>
+            <thead>
+              <tr style='border-bottom:1px solid #e2e8f0;'>
+                <th rowspan='2' style='{th_l}vertical-align:bottom;'>LINEUP</th>
+                <th rowspan='2' style='{th}vertical-align:bottom;'>MIN</th>
+                <th rowspan='2' style='{th}vertical-align:bottom;'>NET</th>
+                {sec_header('— OFFENSE —', 4)}
+                {sec_header('— DEFENSE —', 4)}
+              </tr>
+              <tr style='border-bottom:2px solid #2774AE;'>
+                <th style='{th}'>OFF RTG</th>
+                <th style='{th}'>TS%</th>
+                <th style='{th}'>3P%</th>
+                <th style='{th}'>TOV%</th>
+                <th style='{th}'>DEF RTG</th>
+                <th style='{th}'>OPP TS%</th>
+                <th style='{th}'>OPP TOV%</th>
+                <th style='{th}'>DREB%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows_html}
+            </tbody>
+            </table>""",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ---- ROSTER EDITOR (bottom) ----
     with st.expander("Edit Roster", expanded=False):
         st.caption(
-            "Add, remove, or reorder players. **Position** must be one of PG / CG / SF / PF / C. "
-            "**Depth** sets the stacking order (1 = starter). For stats to auto-link, **BT Name** must "
-            "match the player's exact BartTorvik spelling — leave it blank for freshmen / walk-ons."
+            "**Position** must be one of PG / CG / SF / PF / C. "
+            "**Depth** sets stacking order (1 = starter). **BT Name** must match exact BartTorvik spelling — leave blank for freshmen / walk-ons."
         )
 
         conn = sqlite3.connect('scouting_hub.db')
@@ -799,102 +1476,6 @@ with tab_depth:
             conn.close()
             st.success("Roster updated.")
             st.rerun()
-
-    # ---- VISUAL DEPTH CHART ----
-    conn = sqlite3.connect('scouting_hub.db')
-    chart_df = pd.read_sql_query(
-        "SELECT player_name, position, depth, descriptor, bt_name FROM roster ORDER BY depth",
-        conn
-    )
-    conn.close()
-
-    POSITIONS = [("PG", "Point Guard"), ("CG", "Combo Guard"), ("SF", "Small Forward"),
-                 ("PF", "Power Forward"), ("C", "Center")]
-
-    pos_cols = st.columns(5)
-
-    for i, (pos_code, pos_label) in enumerate(POSITIONS):
-        with pos_cols[i]:
-            # Column header
-            st.markdown(f"""
-                <div style='background-color:#2774AE; color:white; font-weight:bold;
-                            text-align:center; padding:8px; border-radius:6px; margin-bottom:12px;
-                            font-size:13px; letter-spacing:0.5px;'>
-                    {pos_code}<br><span style='font-size:9px; font-weight:400; opacity:0.85;'>{pos_label}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
-            group = chart_df[chart_df["position"] == pos_code].sort_values("depth")
-
-            if group.empty:
-                st.caption("No players assigned")
-                continue
-
-            for _, pl in group.iterrows():
-                pname = pl["player_name"]
-                descriptor = pl["descriptor"] if pl["descriptor"] else ""
-                bt_name = pl["bt_name"] if pl["bt_name"] else ""
-                is_open = pname.strip().upper() == "OPEN"
-                is_starter = int(pl["depth"]) == 1
-
-                # OPEN slot rendering
-                if is_open:
-                    st.markdown(
-                        "<div style=\"border:2px dashed #FFD100;border-radius:8px;padding:14px 10px;"
-                        "margin-bottom:10px;background-color:rgba(255,209,0,0.06);text-align:center;\">"
-                        "<div style=\"font-size:13px;font-weight:bold;color:#FFD100;\">OPEN</div>"
-                        "<div style=\"font-size:10px;color:#FFD100;opacity:0.85;margin-top:2px;\">" + descriptor + "</div>"
-                        "</div>",
-                        unsafe_allow_html=True
-                    )
-                    continue
-
-                # Pull live stats if this player links to BartTorvik
-                stat_line = ""
-                if bt_name:
-                    match = df_all[df_all["PLAYER"] == bt_name]
-                    if not match.empty:
-                        s = match.iloc[0]
-                        stat_line = f"BPM {s['BPM']:.1f} · USG {s['USG']:.0f}% · eFG {s['EFG']:.0f}%"
-
-                border = "#FFD100" if is_starter else "#CBD5E1"
-                starter_badge = (
-                    "<span style=\"font-size:8px;background:#FFD100;color:#0F172A;"
-                    "font-weight:bold;padding:1px 5px;border-radius:3px;\">STARTER</span>"
-                ) if is_starter else ""
-
-                stat_html = (
-                    "<div style=\"font-size:9.5px;color:#2774AE;font-weight:600;margin-top:3px;\">" + stat_line + "</div>"
-                    if stat_line else ""
-                )
-                desc_html = (
-                    "<div style=\"font-size:9.5px;color:#64748B;margin-top:2px;\">" + descriptor + "</div>"
-                    if descriptor else ""
-                )
-
-                card_html = (
-                    "<div style=\"border:1px solid " + border + ";border-left:4px solid " + border + ";border-radius:6px;"
-                    "padding:9px 10px;margin-bottom:10px;background-color:#FFFFFF;"
-                    "box-shadow:1px 1px 3px rgba(0,0,0,0.05);\">"
-                    "<div style=\"display:flex;justify-content:space-between;align-items:center;\">"
-                    "<span style=\"font-size:12.5px;font-weight:bold;color:#0F172A;\">" + pname + "</span>"
-                    + starter_badge +
-                    "</div>"
-                    + stat_html + desc_html +
-                    "</div>"
-                )
-                st.markdown(card_html, unsafe_allow_html=True)
-
-                # Jump-to-profile button (only for stat-linked players)
-                if bt_name and not df_all[df_all["PLAYER"] == bt_name].empty:
-                    if st.button(f"View {pname}", key=f"depth_view_{pos_code}_{pname}",
-                                 use_container_width=True):
-                        st.session_state.active_player = bt_name
-                        st.rerun()
-
-    st.write("")
-    st.caption("⭐ Yellow = projected starter · Dashed yellow = open slot · "
-               "Returning/transfer players show live BartTorvik metrics; incoming freshmen show roster notes.")
 
 
 # ==========================================
@@ -1017,7 +1598,6 @@ with tab1:
                 ("Avg Opp Rank (SOS)", sos_label, None),
                 _card("PPG",     "PPG"),
                 _card("TS%",     "TS"),
-                _card("eFG%",    "EFG"),
                 _card("USG%",    "USG"),
                 _card("AST%",    "AST_PCT"),
                 _card("OREB%",   "OR_PCT"),
