@@ -143,9 +143,14 @@ def init_db():
                        agency       TEXT,
                        photo_url    TEXT,
                        eval_date    TEXT,
-                       notes        TEXT
+                       notes        TEXT,
+                       value_tag    TEXT
                    )
                    ''')
+    # Migrate player_notes tables created before value_tag existed
+    notes_cols = {row[1] for row in cursor.execute("PRAGMA table_info(player_notes)").fetchall()}
+    if "value_tag" not in notes_cols:
+        cursor.execute("ALTER TABLE player_notes ADD COLUMN value_tag TEXT")
     cursor.execute('''
                    CREATE TABLE IF NOT EXISTS roster
                    (
@@ -154,9 +159,17 @@ def init_db():
                        position    TEXT,
                        depth       INTEGER,
                        descriptor  TEXT,
-                       bt_name     TEXT
+                       bt_name     TEXT,
+                       height      TEXT,
+                       class_yr    TEXT
                    )
                    ''')
+    # Migrate roster tables created before height/class_yr existed
+    roster_cols = {row[1] for row in cursor.execute("PRAGMA table_info(roster)").fetchall()}
+    if "height" not in roster_cols:
+        cursor.execute("ALTER TABLE roster ADD COLUMN height TEXT")
+    if "class_yr" not in roster_cols:
+        cursor.execute("ALTER TABLE roster ADD COLUMN class_yr TEXT")
     conn.commit()
     conn.close()
 
@@ -199,8 +212,37 @@ def seed_roster_if_empty():
     conn.close()
 
 
+def backfill_roster_bio():
+    """Fill in real height / class-year for the 26-27 roster. Idempotent — safe to run every startup."""
+    conn = sqlite3.connect('scouting_hub.db')
+    cursor = conn.cursor()
+    # Source: uclabruins.com roster page + official transfer/signee announcements (2026-27 season)
+    bio = {
+        "Trent Perry":      ("6'4\"",  "Junior"),
+        "Stink Robinson":   ("6'2\"",  "Sophomore"),
+        "Markell Alston":   ("6'1\"",  "Redshirt Freshman"),
+        "Jaylen Petty":     ("6'1\"",  "Sophomore"),
+        "Eric Freeny":      ("6'4\"",  "Redshirt Sophomore"),
+        "Gunars Grinvalds": ("6'7\"",  "Freshman"),
+        "Brandon Williams": ("6'7\"",  "Redshirt Junior"),
+        "JoJo Philon":      ("6'8\"",  "Freshman"),
+        "Eric Dailey Jr.":  ("6'8\"",  "Senior"),
+        "Sergej Macura":    ("6'9\"",  "Junior"),
+        "Xavier Booker":    ("6'11\"", "Senior"),
+        "Filip Jovic":      ("6'8\"",  "Sophomore"),
+        "Javonte Floyd":    ("6'9\"",  "Freshman"),
+    }
+    cursor.executemany(
+        "UPDATE roster SET height = ?, class_yr = ? WHERE player_name = ?",
+        [(ht, cl, name) for name, (ht, cl) in bio.items()]
+    )
+    conn.commit()
+    conn.close()
+
+
 init_db()
 seed_roster_if_empty()
+backfill_roster_bio()
 
 
 # ==========================================
@@ -321,11 +363,13 @@ def fetch_barttorvik_safe(top_filter=None, retries=3, delay_between_requests=4):
                         "BLK":         safe_float(row, 22),
                         "STL":         safe_float(row, 23),
                         "FTR":         safe_float(row, 24),
+                        "FT_PCT":      safe_float(row, 15) * 100,
                         "TWO_P":       safe_float(row, 18) * 100,
                         "THREE_P":     safe_float(row, 21) * 100,
                         "THREE_P_100": safe_float(row, 65) if len(row) > 65 else 0.0,
                         "CLASS":       str(row[25]) if len(row) > 25 else "",
                         "HEIGHT":      str(row[26]) if len(row) > 26 else "",
+                        "POS_TAG":     str(row[64]) if len(row) > 64 else "",
                         "PRPG":        safe_float(row, 28),
                         "BPM":         safe_float(row, 50),
                         "OBPM":        safe_float(row, 51),
@@ -760,6 +804,531 @@ def fmt(val, decimals=1, suffix=""):
 
 
 # ==========================================
+# PLAYER CARD DATA & HELPERS (Torvik tiles + Synergy + curated portal notes)
+# ==========================================
+
+PORTAL_PLAYERS = [
+    {"name":"Dillian Shaw","school":"Saint Mary's","pos":"G/Wing","cls":"Fr","height":"6'7\"","tier":"Tier 3","shooting":76,"playmaking":68,"defense":88,"rebounding":64,"tags":["Versatile Defender","3.2 DBPM","Real Shooter","Winning Player"],"projection":"High-major role wing","role":"Two-Way Role Wing","ts":"58.6","usg":"17.0","p3":"42.0","writeup":"High-level role wing who understands team basketball. Strong defender (3.2 DBPM), long, switchable, moves his feet well. Offensively efficient and disciplined. 59% TS, 42% from three on real volume. Projects as a high-major role wing who defends multiple spots, shoots it, and plays within structure."},
+    {"name":"Allen Graves","school":"Santa Clara","pos":"PF","cls":"Fr","height":"6'9\"","tier":"Tier 3","shooting":82,"playmaking":62,"defense":68,"rebounding":72,"tags":["Efficient Stretch 4","Screening IQ","Low-Mistake"],"projection":"High-major starting 4","role":"Stretch 4 / Screener","ts":"63.0","usg":"22.0","p3":"40.0","writeup":"Efficient, low-mistake stretch 4 with real feel. 22% usage on 130 ORTG, 40% from 3, almost no turnovers. Generates value through screening, short-roll reads, offensive rebounding, and smart shot selection."},
+    {"name":"Rolyns Aligbe","school":"Southern Illinois","pos":"PF","cls":"So","height":"6'9\"","tier":"Tier 3","shooting":68,"playmaking":52,"defense":70,"rebounding":84,"tags":["23% DRB","Lob Threat","High Energy","Capable Shooter"],"projection":"High-major depth big","role":"Athletic Big / Lob Threat","ts":"56.0","usg":"19.0","p3":"42.9","writeup":"Athletic, high-energy forward who generates value through rebounding and activity. Elite defensive rebounder (23% DRB). Solid quick bounce, real lob threat, runs well. Capable shooter (21/49 from three)."},
+    {"name":"Tyler Thompson","school":"Montana","pos":"Wing","cls":"RS Fr","height":"6'6\"","tier":"Tier 3","shooting":90,"playmaking":44,"defense":56,"rebounding":52,"tags":["Lethal Shooter","Movement Shooter","Role Clarity","Ball Fake Shooter"],"projection":"High-major role shooter","role":"Movement Shooter","ts":"62.0","usg":"13.0","p3":"42.0","writeup":"Lethal movement shooter. 42% from three on 130+ attempts, taking 5.5 threes per game while barely touching the paint. Ball fake, side-step, quick release. Projects as a high-major role wing."},
+    {"name":"Andrija Bukumirovic","school":"UT Martin","pos":"Wing/F","cls":"Jr","height":"6'6\"","tier":"Tier 3","shooting":72,"playmaking":60,"defense":72,"rebounding":70,"tags":["Swiss Army Knife","High Motor","Spot-Up Shooter","Two-Way"],"projection":"High mid-major starter","role":"Swiss Army Knife Wing","ts":"60.0","usg":"19.0","p3":"38.0","writeup":"Versatile stretch forward who impacts the game without needing the ball. Always ready to shoot off the catch. Rebounds at a high level, brings real defensive value. True swiss-army knife forward."},
+    {"name":"Oswin Erhunmwunse","school":"Providence","pos":"PF/C","cls":"So","height":"6'10\"","tier":"Tier 4","shooting":30,"playmaking":42,"defense":72,"rebounding":84,"tags":["Elite Wedger","Drop Defender","10% Block Rate","Rim Finisher"],"projection":"High-major scheme fit big","role":"Drop Center / Rim Presence","ts":"68.0","usg":"18.0","p3":"0","writeup":"Massive interior presence. 10% block rate, 72% on close 2s. Elite wedge on the offensive glass. Strong drop-coverage defender. Projects as a starting center at a strong mid-major or lower-tier power conference school."},
+    {"name":"Daniel Freitag","school":"Buffalo","pos":"G/CG","cls":"So","height":"6'2\"","tier":"Tier 3","shooting":76,"playmaking":66,"defense":52,"rebounding":58,"tags":["20 PPG","High Volume Shooter","Pick and Roll Creator","39% from 3"],"projection":"High-major bench scorer","role":"High-Usage Scoring Guard","ts":"60.0","usg":"28.0","p3":"39.0","writeup":"High-usage scoring guard who carries Buffalo's offense. 20 PPG, 11 threes per 100 possessions at 39 percent. Real-volume shooter with the ultimate green light. Could be an efficient three-level secondary option backup guard at a high major."},
+    {"name":"London Jemison","school":"Alabama","pos":"Wing/F","cls":"Fr","height":"6'8\"","tier":"Tier 3","shooting":76,"playmaking":48,"defense":64,"rebounding":66,"tags":["Floor Spacer","Off-Ball Mover","35.7% from 3","Low Usage High Efficiency"],"projection":"High-major role wing","role":"Off-Ball Spacing Wing","ts":"56.5","usg":"17.7","p3":"35.7","writeup":"Low-usage, high-efficiency wing whose value comes from spacing, movement, and playing within structure. 17.7% usage with 117.0 ORTG. Quick release, confident mechanics. Defensively functional and switchable."},
+    {"name":"Treyson Anderson","school":"North Dakota State","pos":"F/C","cls":"So","height":"6'9\"","tier":"Tier 3","shooting":74,"playmaking":50,"defense":62,"rebounding":68,"tags":["Pure Jumper","Pick and Pop","38.4% from 3","Efficient Inside Arc"],"projection":"High-major backup 4/5","role":"Pick & Pop Big","ts":"58.0","usg":"18.0","p3":"38.4","writeup":"The jumper is pure. Clean mechanics, confident release, shoots at real volume (33-86 from three at 38.4%). Understands his role: spaces properly, lifts behind drives, ready to fire on the catch."},
+    {"name":"Lewis Walker","school":"NC A&T","pos":"Wing/G","cls":"Fr","height":"6'6\"","tier":"Tier 3","shooting":70,"playmaking":55,"defense":58,"rebounding":58,"tags":["Physical Two Guard","Foul Drawer","37% from 3","Downhill Scorer"],"projection":"High-major secondary scorer","role":"Physical Downhill Wing","ts":"60.0","usg":"23.0","p3":"37.0","writeup":"Strong, physical 6'6 freshman wing who projects as a secondary downhill option at the high-major level. Legit two-guard frame, efficient and versatile. Foul drawing is real, converts at 87% from the line."},
+    {"name":"Rob Dockery","school":"La Salle","pos":"Wing/W","cls":"So","height":"6'6\"","tier":"Tier 3","shooting":58,"playmaking":56,"defense":68,"rebounding":68,"tags":["High-Major Body","Foul Drawer","Transition Threat","Do-It-All Wing"],"projection":"High-major rotation wing","role":"Do-It-All Role Wing","ts":"58.0","usg":"20.0","p3":"32.0","writeup":"High-major role wing who can scale up immediately. Big, strong, physical body. Really effective in transition and around the rim. Low mistake player. Not flashy, but coaches trust him immediately."},
+    {"name":"Adam Olsen","school":"South Alabama","pos":"F","cls":"Jr","height":"6'8\"","tier":"Tier 3","shooting":82,"playmaking":44,"defense":52,"rebounding":58,"tags":["Dynamic Shooter","Movement Catch-and-Shoot","DHO Weapon","One-Dribble Pull Up"],"projection":"High mid-major shooter","role":"Movement Shooter / DHO Weapon","ts":"62.0","usg":"20.0","p3":"41.0","writeup":"Dynamic shooting 4 who thrives almost entirely off movement and spacing actions. Elite catch-and-shoot guy. Not a creator. Clear role player who can really shoot it but is dependent on a system that uses handoffs and movement."},
+    {"name":"Ishan Sharma","school":"Saint Louis","pos":"Wing/G","cls":"So","height":"6'5\"","tier":"Tier 3","shooting":76,"playmaking":60,"defense":72,"rebounding":56,"tags":["44% from 3","Switchable Defender","Role-Driven","Two-Way"],"projection":"High-major rotation wing","role":"Two-Way Connective Wing","ts":"62.0","usg":"17.0","p3":"44.0","writeup":"Role-driven, two-way guard who understands how to impact winning without needing the ball. Defensively solid and versatile. Offensively low usage, efficient production, and real shooting touch: around 44% from three."},
+    {"name":"Tomislav Buljan","school":"New Mexico","pos":"C/PF","cls":"Fr","height":"6'9\"","tier":"Tier 3","shooting":38,"playmaking":44,"defense":62,"rebounding":76,"tags":["Massive Frame","Elite Rim Finisher","Physical Screener","17.7% ORB"],"projection":"High-major role big","role":"Screening Rebounding Big","ts":"60.0","usg":"25.7","p3":"23.5","writeup":"6'9 freshman big with a massive frame and true interior presence. High-usage but projects best as a screening, rebounding, physical interior big who can punish switches."},
+    {"name":"Torey Alston","school":"Middle Tennessee","pos":"F/C","cls":"Jr","height":"6'8\"","tier":"Tier 3","shooting":38,"playmaking":44,"defense":68,"rebounding":78,"tags":["High Motor","Lob Threat","87.5% on Dunks","Foul Drawer"],"projection":"High-major rotation big","role":"High-Motor Lob Threat","ts":"60.0","usg":"20.0","p3":"15.4","writeup":"High-motor frontcourt piece who generates value through screening, rim pressure, and activity. Sets real, physical screens and creates separation. Legit lob threat and interior finisher. Strong rebounder."},
+    {"name":"Terrence Hill Jr.","school":"VCU","pos":"G","cls":"So","height":"6'3\"","tier":"Tier 3","shooting":78,"playmaking":62,"defense":64,"rebounding":52,"tags":["Three-Level Scorer","Screen Navigator","131.9 ORTG","Pull-Up Touch"],"projection":"High-major scoring guard","role":"Three-Level Scoring Guard","ts":"63.1","usg":"23.9","p3":"38.0","writeup":"Natural scorer who is always looking to shoot first. Uses screens really well. 57.3 eFG and 63.1 TS on 23.9% usage. Confident bucket-getter who can hurt you at all three levels."},
+    {"name":"Robert Miller III","school":"LSU","pos":"C","cls":"So","height":"6'10\"","tier":"Tier 3","shooting":40,"playmaking":44,"defense":72,"rebounding":68,"tags":["Freak Athlete","Pick and Roll Finisher","Lob Threat","Step-Up Screen Feel"],"projection":"High-major rim runner","role":"Rim-Running Lob Threat","ts":"58.0","usg":"14.0","p3":"0","writeup":"6'10 freak athlete with obvious tools. Runs well, plays fast. Offensively a pick-and-roll and lob guy. Defensively projects as an athletic 5 who can guard and protect the rim. Fast off the floor with real shot-blocking upside."},
+    {"name":"Bishop Boswell","school":"Tennessee","pos":"G/CG","cls":"So","height":"6'4\"","tier":"Tier 3","shooting":74,"playmaking":64,"defense":70,"rebounding":62,"tags":["Three-Level Scorer","86% FT","62% FTR","64.4 TS"],"projection":"High-major guard","role":"Three-Level Scoring Guard","ts":"64.4","usg":"23.0","p3":"37.0","writeup":"23% usage, 124.8 ORTG, 64.4 TS. Efficient three-level scorer who gets to the line and hits 86%. Finishes well at the rim and shoots 37% from three. Strong frame, physical downhill guard, smart and tough."},
+    {"name":"KJ Lewis","school":"Georgetown","pos":"CG","cls":"Jr","height":"6'4\"","tier":"Tier 3","shooting":52,"playmaking":62,"defense":64,"rebounding":64,"tags":["Strong Frame","Transition Threat","Secondary Playmaker","3rd Team All Big East"],"projection":"High-major rotation guard","role":"Physical Downhill Guard","ts":"54.0","usg":"22.0","p3":"28.0","writeup":"Physically strong, downhill guard who rebounds well for his position and brings real value in transition. Non-shooter. Fits as a high-major 2 guard and secondary scoring option. 3rd team All Big East."},
+    {"name":"Noah Feddersen","school":"North Dakota State","pos":"PF/C","cls":"Jr","height":"6'10\"","tier":"Tier 3","shooting":52,"playmaking":46,"defense":62,"rebounding":70,"tags":["Soft Hands","Efficient Interior","Low-Mistake Big","Surprisingly Athletic"],"projection":"High-major backup 5","role":"Low-Mistake Interior Big","ts":"58.0","usg":"16.0","p3":"0","writeup":"Really solid functional big who can scale up because of how clean and controlled his game is. Efficient around the rim with good touch, soft hands, and better-than-expected athleticism for his size."},
+    {"name":"Carey Booth","school":"Colorado State","pos":"F","cls":"Jr","height":"6'10\"","tier":"Tier 4","shooting":62,"playmaking":42,"defense":68,"rebounding":72,"tags":["Athletic Complementary Big","Defensive Rebounder","Lob Threat"],"projection":"Mid-major starter","role":"Athletic Complementary Big","ts":"58.0","usg":"16.0","p3":"33.0","writeup":"Strong defensive rebounder with solid block rate. Efficient around the rim. Best when cutting, in the dunker spot, or finishing lobs. Projects as a starter at a strong mid-major or 8th-9th man on a good Power 5 team."},
+    {"name":"Isaiah Malone","school":"Florida Gulf Coast","pos":"Wing/F","cls":"Jr","height":"6'8\"","tier":"Tier 4","shooting":58,"playmaking":50,"defense":64,"rebounding":66,"tags":["Super Bouncy","Natural Weak-Side Blocker","Aggressive Downhill","Jumper Upside"],"projection":"High-major rotational big","role":"Athletic Wing / Weak-Side Blocker","ts":"58.0","usg":"19.0","p3":"52.9","writeup":"Long, athletic, explosive forward. Super bouncy and clearly more athletic than most. Natural weak-side shot blocker. Quick off two feet and plays above the rim easily. Could be a rotational big at a high major off of pure athleticism."},
+    {"name":"Ben Hammond","school":"Virginia Tech","pos":"PG/CG","cls":"So","height":"5'11\"","tier":"Tier 4","shooting":74,"playmaking":72,"defense":70,"rebounding":50,"tags":["Low Turnover","Active Hands","High IQ","Real Shooter"],"projection":"High-major role guard","role":"Low-Mistake Floor-Spacing Guard","ts":"60.0","usg":"16.0","p3":"38.0","writeup":"Low-mistake, high-IQ combo guard whose value starts with shooting and decision-making. Does not turn the ball over. Legit three-point weapon on catch-and-shoot. Defensively plays with edge, averages around two steals per game."},
+    {"name":"Jack Karasinski","school":"Bellarmine","pos":"Wing/F","cls":"So","height":"6'7\"","tier":"Tier 4","shooting":80,"playmaking":44,"defense":56,"rebounding":60,"tags":["44.9% FG","77.4% on Cuts","Elite Spot-Up","Non-Creator"],"projection":"High-major depth stretch 4","role":"Spot-Up Shooter / Cutter","ts":"65.0","usg":"16.0","p3":"39.0","writeup":"Elite efficiency wing who thrives without the ball. 44.9% FG, 77.4% on cuts. 129.5 ORTG, 65% TS. Un-athletic stretch 4 who could play 18-25 minutes and be effective."},
+    {"name":"Blake Barklay","school":"East Tennessee State","pos":"Wing/F","cls":"So","height":"6'8\"","tier":"Tier 3","shooting":68,"playmaking":52,"defense":62,"rebounding":62,"tags":["Efficient Role Wing","36% from 3","Post Mismatch","Low Foul Rate"],"projection":"High-major rotation piece","role":"Versatile Role Wing","ts":"60.0","usg":"18.0","p3":"36.0","writeup":"Projects better than a lot of mid-major forwards. Efficient, plays under control. 36% from three on about 40 attempts. Can put it on the deck and attack on hard closeouts. Can absolutely be an effective high-major rotation piece."},
+    {"name":"Gavin Doty","school":"Siena","pos":"G","cls":"So","height":"6'5\"","tier":"Tier 4","shooting":72,"playmaking":68,"defense":58,"rebounding":68,"tags":["Controlled Iso Scorer","Midrange Bag","Low Turnover","Strong Rebounder for Guard"],"projection":"High mid-major scorer","role":"Iso Mid-Range Scorer","ts":"57.0","usg":"22.6","p3":"28.0","writeup":"Plays 90% of minutes and scores efficiently on solid usage while taking great care of the ball. Controlled, iso-heavy scorer who operates from the top of the key and lives in the midrange."},
+    {"name":"Sonny Wilson","school":"Toledo","pos":"CG","cls":"Jr","height":"6'1\"","tier":"Tier 4","shooting":76,"playmaking":68,"defense":52,"rebounding":50,"tags":["41% from 3","Snake Screen Specialist","Low Turnover","Crafty Scorer"],"projection":"High-major starter","role":"Ball Screen Scoring Guard","ts":"60.0","usg":"23.0","p3":"41.0","writeup":"Skilled offensive guard with real value as a shot-maker and low-turnover ball handler. 17 PPG with 23% usage, shot 41% from three on about 100 attempts. Really good in the midrange coming off ball screens."},
+    {"name":"Chol Machot","school":"Charleston","pos":"F/C","cls":"RS So","height":"7'0\"","tier":"Tier 4","shooting":42,"playmaking":38,"defense":72,"rebounding":82,"tags":["Elite Length","High Motor","Rim Protector","Transition Runner"],"projection":"High-major role big","role":"Rim Protector / Energy Big","ts":"56.0","usg":"16.0","p3":"0","writeup":"Long, high-motor rim protector who generates value through rebounding and shot blocking. Elite length, blocks shots outside his area. Runs the floor extremely well for his size. Projects as a high-major role big."},
+]
+
+
+def parse_height_inches(ht_str):
+    """Convert height string like 6'7" or 6-7 to total inches. Clean and reliable."""
+    try:
+        s = str(ht_str).replace('"', '').strip()
+        if "\'" in s:
+            parts = s.split("\'")
+            return int(parts[0].strip()) * 12 + (int(parts[1].strip()) if parts[1].strip().isdigit() else 0)
+        if "-" in s:
+            parts = s.split("-")
+            return int(parts[0].strip()) * 12 + int(parts[1].strip())
+        val = int(s)
+        return val if val > 12 else val * 12
+    except:
+        return 78
+
+
+# ---- national percentile benchmarks (BartTorvik, all D1) for the tile card front ----
+NATIONAL_PCT_STATS = ["PRPG", "BPM", "OBPM", "DBPM", "ORTG", "USG", "EFG", "TS",
+                       "TWO_P", "THREE_P", "FTR", "FT_PCT", "AST", "TO", "OR", "DR",
+                       "BLK", "STL", "MIN_PCT"]
+NATIONAL_LOWER_IS_BETTER = {"TO"}
+
+
+@st.cache_data(ttl=3600)
+def build_national_benchmarks(df_all: pd.DataFrame) -> dict:
+    """Sorted national value lists per stat, used to percentile-rank any player for the tile card."""
+    d = df_all.copy()
+    if "AST" in d.columns and "TO" in d.columns:
+        d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
+    benchmarks = {}
+    for col in NATIONAL_PCT_STATS + ["AST_TO"]:
+        if col in d.columns:
+            benchmarks[col] = sorted(d[col].dropna().tolist())
+    return benchmarks
+
+
+def national_pct(stat, value, benchmarks):
+    vals = benchmarks.get(stat)
+    if not vals or value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    p = get_pct(value, vals)
+    if p is None:
+        return None
+    return (100 - p) if stat in NATIONAL_LOWER_IS_BETTER else p
+
+
+def build_torvik_tile_groups(stats_row, benchmarks):
+    """Real BartTorvik advanced-stat tiles for the card front, grouped like the Synergy tile mockup."""
+    def t(stat, label, decimals=1, suffix=""):
+        val = stats_row.get(stat)
+        pct = national_pct(stat, val, benchmarks)
+        try:
+            display = f"{float(val):.{decimals}f}{suffix}"
+        except (TypeError, ValueError):
+            display = "—"
+        return (label, display, pct if pct is not None else 50.0)
+
+    try:
+        ast_v, to_v = float(stats_row.get("AST", 0) or 0), float(stats_row.get("TO", 0) or 0)
+        a_to = round(ast_v / to_v, 1) if to_v else None
+    except (TypeError, ValueError):
+        a_to = None
+    a_to_pct = national_pct("AST_TO", a_to, benchmarks)
+
+    return [
+        ("IMPACT", [t("PRPG", "PRPG!"), t("BPM", "BPM"), t("OBPM", "OBPM"), t("DBPM", "DBPM")]),
+        ("EFFICIENCY", [t("ORTG", "ORTG"), t("USG", "USG%"), t("EFG", "EFG%"), t("TS", "TS%")]),
+        ("SHOOTING", [t("TWO_P", "2P%"), t("THREE_P", "3P%"), t("FTR", "FTr"), t("FT_PCT", "FT%")]),
+        ("PLAYMAKING", [
+            t("AST", "AST%"), t("TO", "TO%"),
+            ("A/TO", f"{a_to:.1f}" if a_to is not None else "—", a_to_pct if a_to_pct is not None else 50.0),
+            t("MIN_PCT", "MIN%"),
+        ]),
+        ("REB / DEFENSE", [t("OR", "OR%"), t("DR", "DR%"), t("BLK", "BLK%"), t("STL", "STL%")]),
+    ]
+
+
+# ---- Auto-generated skill tags: real percentile stats, not hand-typed labels ----
+AUTO_TAG_STATS = [
+    ("THREE_P", "Knockdown Shooter"),
+    ("FT_PCT",  "Automatic at the Line"),
+    ("TWO_P",   "Efficient Inside the Arc"),
+    ("TS",      "High-Efficiency Scorer"),
+    ("EFG",     "Elite Shot Selection"),
+    ("USG",     "High-Usage Focal Point"),
+    ("AST",     "Playmaker"),
+    ("TO",      "Low-Mistake Ball-Handler"),
+    ("OR",      "Elite Offensive Rebounder"),
+    ("DR",      "Defensive Rebounding Anchor"),
+    ("BLK",     "Rim Protector"),
+    ("STL",     "Disruptive Defender"),
+    ("BPM",     "High-Impact Winner"),
+    ("OBPM",    "Offensive Engine"),
+    ("DBPM",    "Defensive Menace"),
+    ("FTR",     "Draws Contact / Gets to the Line"),
+]
+
+
+def build_auto_skill_tags(stats_row, benchmarks, top_n=4, threshold=85.0):
+    """Tags generated from real national percentiles — fires only on genuinely elite stats."""
+    scored = []
+    for stat, label in AUTO_TAG_STATS:
+        pct = national_pct(stat, stats_row.get(stat), benchmarks)
+        if pct is not None and pct >= threshold:
+            scored.append((pct, label))
+    scored.sort(key=lambda x: -x[0])
+    return [label for _, label in scored[:top_n]]
+
+
+def build_synergy_auto_tags(play_tiles, top_n=2, pct_threshold=80.0):
+    """Tags from real Synergy shot diet: what they attempt most, and what they're most efficient at."""
+    tags = []
+    if not play_tiles:
+        return tags
+    top_label = play_tiles[0][0]  # play_tiles is already sorted by freq_pct desc from the query
+    tags.append(f"Primary Action: {top_label.title()}")
+    efficient = sorted(
+        (t for t in play_tiles if t[2] >= pct_threshold),
+        key=lambda t: -t[2]
+    )
+    for label, ppp, pct in efficient:
+        if label.title() != top_label.title():
+            tags.append(f"Elite {label.title()} Efficiency")
+            break
+    return tags[:top_n]
+
+
+# ---- Synergy back-of-card (uses the real synergy_playtypes / synergy_shots tables built by
+#      build_synergy_playtypes.py / build_synergy_enriched.py — empty/graceful until those are run) ----
+@st.cache_data(ttl=3600)
+def get_synergy_card_data(player_name: str):
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        play_rows = conn.execute(
+            "SELECT play_type, ppp, freq_pct FROM synergy_playtypes "
+            "WHERE player_name = ? AND freq_pct > 0 ORDER BY freq_pct DESC",
+            (player_name,)
+        ).fetchall()
+        play_tiles = []
+        for play_type, ppp, freq in play_rows:
+            bench = sorted(r[0] for r in conn.execute(
+                "SELECT ppp FROM synergy_playtypes WHERE play_type = ? AND ppp IS NOT NULL", (play_type,)
+            ).fetchall())
+            pct = get_pct(ppp, bench) if bench else None
+            play_tiles.append((play_type.upper(), f"{ppp:.2f}", pct if pct is not None else 50.0))
+
+        shot_row = conn.execute(
+            "SELECT fg2_pct, fg3_pct, efg_pct, ppp FROM synergy_shots WHERE player_name = ?",
+            (player_name,)
+        ).fetchone()
+        shot_tiles = []
+        if shot_row:
+            fg2, fg3, efg, ppp_s = shot_row
+
+            def bench_pct(col, val):
+                if val is None:
+                    return 50.0
+                bench = sorted(r[0] for r in conn.execute(
+                    f"SELECT {col} FROM synergy_shots WHERE {col} IS NOT NULL"
+                ).fetchall())
+                p = get_pct(val, bench) if bench else None
+                return p if p is not None else 50.0
+
+            if fg2 is not None:
+                shot_tiles.append(("2P%", f"{fg2 * 100:.1f}%", bench_pct("fg2_pct", fg2)))
+            if fg3 is not None:
+                shot_tiles.append(("3P%", f"{fg3 * 100:.1f}%", bench_pct("fg3_pct", fg3)))
+            if efg is not None:
+                shot_tiles.append(("EFG%", f"{efg * 100:.1f}%", bench_pct("efg_pct", efg)))
+            if ppp_s is not None:
+                shot_tiles.append(("PPP", f"{ppp_s:.2f}", bench_pct("ppp", ppp_s)))
+        conn.close()
+        return play_tiles, shot_tiles
+    except Exception:
+        return [], []
+
+
+def _tile_html(label, value, pct):
+    bg, fg = pct_color(pct)
+    return (f'<div class="tile" style="background:{bg}">'
+            f'<div class="k" style="color:{fg};opacity:.72;">{label}</div>'
+            f'<div class="v" style="color:{fg};">{value}</div></div>')
+
+
+def _tile_group_html(group_label, tiles):
+    tiles_html = "".join(_tile_html(*tv) for tv in tiles)
+    return (f'<div class="grp"><div class="grp-lab">{group_label}</div>'
+            f'<div class="tiles">{tiles_html}</div></div>')
+
+
+# ---- real BartTorvik position tag (index 64 of the raw feed) -> Guard/Wing/Big bucket ----
+POS_TAG_BUCKET = {
+    "Scoring PG": "Guard", "Pure PG": "Guard", "Combo G": "Guard",
+    "Wing G": "Wing", "Wing F": "Wing", "Stretch 4": "Wing",
+    "PF/C": "Big", "C": "Big",
+}
+
+POSITION_METRIC_GROUPS = {
+    "Guard": ("GUARD METRICS", [("AST", "AST%", "%"), ("TO", "TOV%", "%"),
+                                 ("THREE_P", "3P%", "%"), ("STL", "STL%", "%")]),
+    "Wing":  ("WING METRICS",  [("THREE_P", "3P%", "%"), ("STL", "STL%", "%"),
+                                 ("BPM", "BPM", ""), ("DBPM", "DBPM", "")]),
+    "Big":   ("BIG METRICS",   [("BLK", "BLK%", "%"), ("OR", "OR%", "%"),
+                                 ("DR", "DR%", "%"), ("BPM", "BPM", "")]),
+}
+
+
+def build_general_tiles(stats_row):
+    """Plain per-game/season box-score tiles for the card front — no percentile coloring."""
+    def g(stat, label, decimals=1, suffix=""):
+        val = stats_row.get(stat)
+        try:
+            display = f"{float(val):.{decimals}f}{suffix}"
+        except (TypeError, ValueError):
+            display = "—"
+        return (label, display)
+
+    return [
+        g("PPG", "PTS"), g("RPG", "REB"), g("APG", "AST"),
+        g("TWO_P", "2PT%", suffix="%"), g("THREE_P", "3PT%", suffix="%"),
+        g("FTR", "FTR"), g("FT_PCT", "FT%", suffix="%"),
+    ]
+
+
+def build_position_tiles(stats_row, bucket):
+    label, specs = POSITION_METRIC_GROUPS.get(bucket, POSITION_METRIC_GROUPS["Wing"])
+    tiles = []
+    for stat, tile_label, suffix in specs:
+        val = stats_row.get(stat)
+        try:
+            display = f"{float(val):.1f}{suffix}"
+        except (TypeError, ValueError):
+            display = "—"
+        tiles.append((tile_label, display))
+    return label, tiles
+
+
+def _flat_tile_html(label, value):
+    return (f'<div class="tile flat">'
+            f'<div class="k">{label}</div><div class="v">{value}</div></div>')
+
+
+def _flat_tile_group_html(group_label, tiles):
+    tiles_html = "".join(_flat_tile_html(l, v) for l, v in tiles)
+    return (f'<div class="grp"><div class="grp-lab">{group_label}</div>'
+            f'<div class="tiles">{tiles_html}</div></div>')
+
+
+# ==========================================
+# UNIVERSAL COMP FINDER — works for any player, not just curated portal targets.
+# Similarity is computed in percentile space (same national percentiles used for the
+# tile card / auto-tags), weighted by position bucket, with the weight boosted toward
+# whichever real-stat category the player is genuinely elite in, plus a small conference-
+# tier nudge (P5 vs non-P5) so comps skew toward players facing similar competition.
+# ==========================================
+COMP_CATEGORY_STATS = {
+    "Shooting":   ["THREE_P", "TWO_P", "TS", "EFG", "FT_PCT"],
+    "Playmaking": ["AST", "TO"],
+    "Rebounding": ["OR", "DR"],
+    "Defense":    ["BLK", "STL", "DBPM"],
+}
+
+COMP_BASE_WEIGHTS = {
+    "Guard": {"ORTG": 0.13, "AST": 0.12, "TO": 0.09, "STL": 0.09, "MIN_PCT": 0.07, "THREE_P": 0.08,
+              "TS": 0.06, "BPM": 0.06, "USG": 0.05, "EFG": 0.04, "OBPM": 0.03, "DBPM": 0.03,
+              "OR": 0.02, "DR": 0.03, "BLK": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08},
+    "Wing":  {"BPM": 0.13, "DBPM": 0.09, "STL": 0.09, "BLK": 0.09, "DR": 0.09, "OR": 0.07,
+              "TS": 0.05, "EFG": 0.04, "THREE_P": 0.05, "AST": 0.04, "USG": 0.04, "ORTG": 0.04,
+              "TO": 0.03, "OBPM": 0.04, "MIN_PCT": 0.04, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08},
+    "Big":   {"ORTG": 0.11, "OR": 0.11, "DR": 0.11, "BLK": 0.09, "AST": 0.07, "TO": 0.06,
+              "MIN_PCT": 0.06, "BPM": 0.06, "TS": 0.05, "USG": 0.04, "EFG": 0.03, "STL": 0.03,
+              "DBPM": 0.03, "OBPM": 0.03, "THREE_P": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08},
+}
+
+CONF_TIER_BONUS = 0.05
+DOMINANT_CATEGORY_BOOST = 1.6
+DOMINANT_CATEGORY_MIN_PCT = 70.0
+
+
+def conf_tier(conf):
+    return "P5" if conf in P5_CONFS else "Other"
+
+
+def find_player_dominant_category(stats_row, benchmarks):
+    """Which real-stat category (Shooting/Playmaking/Rebounding/Defense) is this player's
+    genuine standout, if any. Returns None if nothing clears the bar — most players don't
+    have one loud, obvious carrying trait, and it'd be dishonest to force one."""
+    cat_avgs = {}
+    for cat, stats in COMP_CATEGORY_STATS.items():
+        pcts = [p for p in (national_pct(s, stats_row.get(s), benchmarks) for s in stats) if p is not None]
+        cat_avgs[cat] = sum(pcts) / len(pcts) if pcts else 0.0
+    best_cat = max(cat_avgs, key=cat_avgs.get)
+    return best_cat if cat_avgs[best_cat] >= DOMINANT_CATEGORY_MIN_PCT else None
+
+
+def build_comp_weights(bucket, dominant_category):
+    weights = dict(COMP_BASE_WEIGHTS.get(bucket, COMP_BASE_WEIGHTS["Wing"]))
+    if dominant_category:
+        for stat in COMP_CATEGORY_STATS.get(dominant_category, []):
+            if stat in weights:
+                weights[stat] *= DOMINANT_CATEGORY_BOOST
+    total = sum(weights.values())
+    return {k: v / total for k, v in weights.items()} if total else weights
+
+
+def find_stat_comps(player_name, df_all, benchmarks, n=8, bucket_override=None):
+    """Real-stat-driven comp finder for any player in df_all. Returns (results, dominant_category)
+    where results is a sorted list of (match_score_0_to_1, candidate_row)."""
+    match = df_all[df_all["PLAYER"] == player_name]
+    if match.empty:
+        return [], None
+    target = match.iloc[0]
+
+    target_ht = parse_height_inches(target.get("HEIGHT", "6-6"))
+    bucket = bucket_override or POS_TAG_BUCKET.get(target.get("POS_TAG", ""), "Wing")
+    dominant_category = find_player_dominant_category(target, benchmarks)
+    weights = build_comp_weights(bucket, dominant_category)
+
+    target_tier = conf_tier(target.get("CONF", ""))
+    target_name = str(target["PLAYER"])
+    target_team = str(target["TEAM"])
+
+    results = []
+    for _, row in df_all.iterrows():
+        if str(row["PLAYER"]) == target_name and str(row["TEAM"]) == target_team:
+            continue
+        cand_ht = parse_height_inches(row.get("HEIGHT", "6-6"))
+        if abs(target_ht - cand_ht) > 5:
+            continue
+
+        score = 0.0
+        for stat, w in weights.items():
+            if stat == "HEIGHT":
+                score += w * max(0.0, 1 - abs(target_ht - cand_ht) / 5.0)
+                continue
+            t_pct = national_pct(stat, target.get(stat), benchmarks)
+            c_pct = national_pct(stat, row.get(stat), benchmarks)
+            if t_pct is None or c_pct is None:
+                continue
+            score += w * (1 - abs(t_pct - c_pct) / 100.0)
+
+        bonus = CONF_TIER_BONUS if conf_tier(row.get("CONF", "")) == target_tier else -CONF_TIER_BONUS
+        score = max(0.0, min(1.0, score + bonus))
+        results.append((score, row))
+
+    results.sort(key=lambda x: -x[0])
+    return results[:n], dominant_category
+
+
+def render_tile_card_html(player, df_all, benchmarks, show_writeup=False):
+    name       = player.get("name", "")
+    height     = player.get("height", "")
+    pos        = player.get("pos", "")
+    cls        = player.get("cls", "")
+    school     = player.get("school", "")
+    tier       = player.get("tier", "")
+    projection = player.get("projection", "")
+    role       = player.get("role", "")
+
+    match = df_all[df_all["PLAYER"] == name]
+    stats_row = match.iloc[0] if not match.empty else None
+    pos_tag = stats_row.get("POS_TAG", "") if stats_row is not None else ""
+    bucket = POS_TAG_BUCKET.get(pos_tag, "Wing")
+    pos_display = pos_tag or pos or bucket
+
+    # ---- FRONT: plain per-game/season box score + position-specific metrics ----
+    if stats_row is not None:
+        general_tiles = build_general_tiles(stats_row)
+        pos_label, position_tiles = build_position_tiles(stats_row, bucket)
+        front_blocks = (_flat_tile_group_html("GENERAL", general_tiles)
+                         + _flat_tile_group_html(pos_label, position_tiles))
+    else:
+        front_blocks = ('<div class="empty">No BartTorvik stat line found for this '
+                         'player this season.</div>')
+
+    # ---- BACK: BartTorvik percentile tiles + Synergy play-type / shooting profile ----
+    if stats_row is not None:
+        groups = build_torvik_tile_groups(stats_row, benchmarks)
+        back_blocks = "".join(_tile_group_html(g, tiles) for g, tiles in groups)
+    else:
+        back_blocks = ('<div class="empty">No BartTorvik stat line found for this '
+                        'player this season.</div>')
+
+    play_tiles, shot_tiles = get_synergy_card_data(name)
+    if play_tiles:
+        back_blocks += _tile_group_html("SYNERGY PLAY TYPES", play_tiles)
+    if shot_tiles:
+        back_blocks += _tile_group_html("SHOOTING PROFILE (SYNERGY)", shot_tiles)
+    if not play_tiles and not shot_tiles and stats_row is not None:
+        back_blocks += ('<div class="empty">No Synergy data loaded for this player yet. Run '
+                         'build_synergy_playtypes.py / build_synergy_enriched.py to populate '
+                         'play-type and shooting-profile tiles.</div>')
+
+    # Position / role / main-skill tags — shown on the back, under the advanced stats.
+    # Skill tags combine any hand-curated scouting intel with tags auto-generated from real
+    # percentile stats and Synergy shot/play-type data, so every player gets meaningful tags,
+    # not just the hand-scouted portal targets.
+    skill_tags = list(player.get("tags", []))
+    if stats_row is not None:
+        for t in build_auto_skill_tags(stats_row, benchmarks):
+            if t not in skill_tags:
+                skill_tags.append(t)
+    for t in build_synergy_auto_tags(play_tiles):
+        if t not in skill_tags:
+            skill_tags.append(t)
+
+    tag_chips = [f'<span class="tagchip tagchip-pos">{pos_display.upper()}</span>']
+    if role:
+        tag_chips.append(f'<span class="tagchip tagchip-role">{role.upper()}</span>')
+    tag_chips += [f'<span class="tagchip">{t}</span>' for t in skill_tags]
+    back_blocks += (f'<div class="grp"><div class="grp-lab">TAGS</div>'
+                     f'<div class="tags">{"".join(tag_chips)}</div></div>')
+
+    writeup_html = ""
+    if show_writeup and player.get("writeup"):
+        writeup_html = f'<div class="writeup">{player["writeup"]}</div>'
+
+    card_id = re.sub(r'[^a-zA-Z0-9_]', '', f"card_{name.replace(' ', '_')}")
+
+    return f"""
+<!doctype html><html><head><meta charset="UTF-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{{--card:#ffffff;--edge:#dde2ee;--ink:#0F172A;--dim:#64748B;--faint:#94A3B8;--gold:#B8860B;--blue:#2774AE;}}
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{background:transparent;color:var(--ink);font-family:'Barlow',sans-serif;}}
+  .card{{background:var(--card);border:1px solid var(--edge);border-radius:13px;padding:20px 22px 22px;
+    margin-bottom:8px;box-shadow:0 1px 4px rgba(0,0,0,.06);}}
+  .head{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;}}
+  .title{{font-size:19px;font-weight:700;color:var(--ink);}}
+  .title span{{display:block;font-family:'DM Mono',monospace;font-size:10px;color:var(--dim);
+    letter-spacing:.04em;margin-top:4px;font-weight:400;text-transform:uppercase;}}
+  .tier{{font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;
+    border:1px solid #f9d98a;color:#92600a;font-weight:600;white-space:nowrap;}}
+  .grp{{margin-bottom:12px}}
+  .grp-lab{{font-family:'DM Mono',monospace;font-size:9.5px;letter-spacing:.16em;
+    color:var(--dim);margin-bottom:8px;text-transform:uppercase;}}
+  .tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}}
+  .tile{{border-radius:8px;padding:11px 10px 10px;border:1px solid rgba(0,0,0,.04)}}
+  .tile .k{{font-family:'DM Mono',monospace;font-size:8.5px;letter-spacing:.05em;
+    text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+  .tile .v{{font-family:'DM Mono',monospace;font-size:18px;font-weight:600;margin-top:3px;line-height:1;}}
+  .tile.flat{{background:#F1F5F9;}}
+  .tile.flat .k{{color:#64748B;}}
+  .tile.flat .v{{color:#0F172A;}}
+  .empty{{font-family:'DM Mono',monospace;font-size:11px;color:var(--dim);padding:16px 0;line-height:1.5;}}
+  .tags{{margin-top:8px;}}
+  .tagchip{{background:#e8f1f9;color:#2774AE;font-family:'DM Mono',monospace;font-size:8px;
+    font-weight:600;padding:3px 9px;border-radius:3px;border:1px solid #b8d3ec;margin:2px 4px 2px 0;
+    display:inline-block;text-transform:uppercase;letter-spacing:.04em;}}
+  .tagchip-pos{{background:#fff7e0;color:#92600a;border-color:#f9d98a;}}
+  .tagchip-role{{background:#eafaf1;color:#1a7a4c;border-color:#b8e6cc;}}
+  .proj{{margin-top:12px;padding-top:12px;border-top:1px solid var(--edge);}}
+  .proj-t{{font-size:12.5px;font-weight:700;color:var(--ink);}}
+  .flipbtn{{font-family:'DM Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.05em;
+    background:#F1F5F9;color:var(--ink);border:1px solid #CBD5E1;border-radius:5px;
+    padding:6px 12px;cursor:pointer;margin-top:10px;}}
+  .flipbtn:hover{{background:#E2E8F0}}
+  .writeup{{font-family:'Barlow',sans-serif;font-size:12px;line-height:1.6;color:#374151;
+    padding:12px 0 0;}}
+  .back{{display:none}}
+</style>
+</head>
+<body>
+<div class="card" id="{card_id}">
+  <div class="head">
+    <div class="title">{name}<span>{pos_display} &middot; {height} &middot; {cls} &middot; {school}</span></div>
+    <span class="tier">{tier}</span>
+  </div>
+  <div class="front">{front_blocks}</div>
+  <div class="back">{back_blocks}</div>
+  <div class="proj"><div class="proj-t">{projection}</div></div>
+  <button class="flipbtn" onclick="
+    var c=document.getElementById('{card_id}');
+    var f=c.querySelector('.front'); var b=c.querySelector('.back');
+    var showFront = f.style.display === 'none';
+    f.style.display = showFront ? 'block' : 'none';
+    b.style.display = showFront ? 'none' : 'block';
+    this.textContent = showFront ? '⟲ Advanced (Torvik / Synergy)' : '⟲ General Stats';
+  ">&#10226; Advanced (Torvik / Synergy)</button>
+  {writeup_html}
+</div>
+</body>
+</html>
+"""
+
+
+# ==========================================
 # DATA LOAD
 # ==========================================
 load_bar = st.progress(0, text="Loading full database...")
@@ -795,9 +1364,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_depth, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab_card, tab_depth, tab_onepager, tab2, tab3, tab4 = st.tabs([
+    "Player Card",
     "Depth Chart",
-    "Individual Player Profile",
+    "One Pager",
     "Portal Discovery Engine",
     "Front Office Target Board",
     "Big Board Print View",
@@ -813,7 +1383,7 @@ components.html(f"""
 <script>
 (function() {{
     var goToProfile = {'true' if _go_to_profile else 'false'};
-    var savedTab = goToProfile ? 1 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
+    var savedTab = goToProfile ? 0 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
 
     function attachListeners(tabs) {{
         tabs.forEach(function(tab, i) {{
@@ -827,9 +1397,9 @@ components.html(f"""
         var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
         if (tabs.length >= 6) {{
             attachListeners(tabs);
-            if (savedTab > 0) {{
+            if (goToProfile || savedTab > 0) {{
                 tabs[savedTab].click();
-                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '1'); }}
+                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '0'); }}
             }}
         }} else {{
             setTimeout(tryRestore, 100);
@@ -1479,17 +2049,26 @@ div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-
 
 
 # ==========================================
-# TAB 1: INDIVIDUAL PLAYER SCOUTING
+# TAB: PLAYER CARD (Individual Profile + Advanced Card + Target Board link-up)
 # ==========================================
-with tab1:
-    st.subheader("Personnel Target Evaluation")
+with tab_card:
+    st.subheader("Player Card")
 
-    current_idx = all_player_names.index(st.session_state.active_player)
-    selected_dropdown = st.selectbox("Search or select player profile:", all_player_names, index=current_idx)
+    # Two-way sync between this dropdown and active_player (set by Depth Chart, Portal
+    # Discovery, Target Board, etc). A widget's key can't be reassigned after it's
+    # instantiated, so external changes must be applied before creating the selectbox —
+    # but we can only tell "external change" apart from "user touched this dropdown" by
+    # tracking what active_player was the last time *this* tab synced it.
+    if st.session_state.active_player != st.session_state.get("_last_synced_active_player"):
+        st.session_state["card_player_select"] = st.session_state.active_player
+
+    selected_dropdown = st.selectbox("Search or select any player:", all_player_names,
+                                     key="card_player_select")
 
     if selected_dropdown != st.session_state.active_player:
         st.session_state.active_player = selected_dropdown
-        st.rerun()
+
+    st.session_state["_last_synced_active_player"] = st.session_state.active_player
 
     current_player = st.session_state.active_player
     p_data = df_all[df_all["PLAYER"] == current_player].iloc[0]
@@ -1497,21 +2076,23 @@ with tab1:
     conn = sqlite3.connect('scouting_hub.db')
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT scout_name, priority_tier, position, role, rumored_nil, personal_val, agent, agency, photo_url, eval_date, notes FROM player_notes WHERE player_name = ?",
+        "SELECT scout_name, priority_tier, position, role, rumored_nil, personal_val, agent, agency, "
+        "photo_url, eval_date, notes, value_tag FROM player_notes WHERE player_name = ?",
         (current_player,))
     db_row = cursor.fetchone()
 
-    saved_scout  = db_row[0] if db_row else "Trey Doty"
-    saved_tier   = db_row[1] if db_row else "Watchlist"
-    saved_pos    = db_row[2] if db_row else "PG"
-    saved_role   = db_row[3] if db_row else ""
-    saved_nil    = db_row[4] if db_row else ""
-    saved_val    = db_row[5] if db_row else ""
-    saved_agent  = db_row[6] if db_row else ""
-    saved_agency = db_row[7] if db_row else ""
-    saved_photo  = db_row[8] if db_row else ""
-    saved_date   = db_row[9] if db_row else "No previous evaluations logged"
-    saved_notes  = db_row[10] if db_row else ""
+    saved_scout     = db_row[0] if db_row and db_row[0] else "Trey Doty"
+    saved_tier      = db_row[1] if db_row and db_row[1] else "Mid Priority"
+    saved_pos       = db_row[2] if db_row and db_row[2] else "PG"
+    saved_role      = db_row[3] if db_row else ""
+    saved_nil       = db_row[4] if db_row else ""
+    saved_val       = db_row[5] if db_row else ""
+    saved_agent     = db_row[6] if db_row else ""
+    saved_agency    = db_row[7] if db_row else ""
+    saved_photo     = db_row[8] if db_row else ""
+    saved_date      = db_row[9] if db_row else "No previous evaluations logged"
+    saved_notes     = db_row[10] if db_row else ""
+    saved_value_tag = db_row[11] if db_row and db_row[11] else "Properly Valued"
 
     if not saved_photo:
         saved_photo = fetch_sr_headshot_silent(current_player, p_data["TEAM"])
@@ -1521,7 +2102,10 @@ with tab1:
 
     conn.close()
 
-    col_img, col_info = st.columns([1, 5])
+    TIER_OPTIONS = ["High Priority", "Mid Priority", "Low Priority"]
+    VALUE_TAG_OPTIONS = ["Undervalued", "Properly Valued", "Overvalued"]
+
+    col_img, col_info, col_board = st.columns([1, 3.2, 1.8])
     with col_img:
         if saved_photo:
             st.image(saved_photo, width=130)
@@ -1529,12 +2113,35 @@ with tab1:
             st.info("No headshot logged")
 
     with col_info:
-        c1, c2, c3, c4 = st.columns([2.5, 1, 1, 1])
+        st.markdown(f"### {current_player}")
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Program",    p_data["TEAM"])
         c2.metric("Conference", p_data["CONF"])
         c3.metric("Class",      p_data["CLASS"])
         c4.metric("Height",     p_data["HEIGHT"])
         st.caption(f"📅 **Last Evaluation Update Stamped:** {saved_date}")
+
+    with col_board:
+        st.markdown("**🎯 Front Office Target Board**")
+        board_tier = st.selectbox("Priority", TIER_OPTIONS,
+                                  index=TIER_OPTIONS.index(saved_tier) if saved_tier in TIER_OPTIONS else 1,
+                                  key="board_tier_quick")
+        board_value_tag = st.selectbox("Value Tag", VALUE_TAG_OPTIONS,
+                                       index=VALUE_TAG_OPTIONS.index(saved_value_tag) if saved_value_tag in VALUE_TAG_OPTIONS else 1,
+                                       key="board_value_quick")
+        if st.button("➕ Add to Board", key="add_to_board_quick", width="stretch"):
+            conn = sqlite3.connect('scouting_hub.db')
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO player_notes (player_name, team_name, priority_tier, value_tag) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(player_name) DO UPDATE SET "
+                "priority_tier=excluded.priority_tier, value_tag=excluded.value_tag, team_name=excluded.team_name",
+                (current_player, p_data["TEAM"], board_tier, board_value_tag)
+            )
+            conn.commit()
+            conn.close()
+            st.success(f"Added {current_player} to the {board_tier} board as {board_value_tag}.")
+            st.rerun()
 
     st.write("**Player Metrics Line**")
 
@@ -1639,17 +2246,111 @@ with tab1:
                 st.pyplot(_fig, use_container_width=True)
             plt.close(_fig)
 
-    st.write("***")
+    st.divider()
 
-    col_scout, col_tier = st.columns(2)
+    st.write("**Advanced Card — BartTorvik tiles (front) · Synergy shot/play type (back, via flip button)**")
+    card_benchmarks = build_national_benchmarks(df_all)
+    curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
+    card_player = curated_player or {
+        "name": current_player, "school": p_data["TEAM"], "pos": saved_pos,
+        "cls": p_data["CLASS"], "height": p_data["HEIGHT"], "tier": saved_tier,
+        "projection": "", "role": saved_role, "tags": [],
+    }
+    components.html(
+        render_tile_card_html(card_player, df_all, card_benchmarks, show_writeup=False),
+        height=760, scrolling=True,
+    )
+
+    with st.expander(f"Find Comps: {current_player}", expanded=False):
+        if curated_player:
+            if curated_player.get("writeup"):
+                st.write(curated_player["writeup"])
+            st.write(f"**Projection:** {curated_player.get('projection', '')}  ·  "
+                     f"**Role:** {curated_player.get('role', '')}")
+            st.divider()
+
+        if df_all is None or df_all.empty:
+            st.warning("BartTorvik data unavailable.")
+        else:
+            comp_bucket_options = ["Guard", "Wing", "Big"]
+            auto_bucket = POS_TAG_BUCKET.get(p_data.get("POS_TAG", ""), "Wing")
+            cc1, cc2 = st.columns([1, 2])
+            with cc1:
+                comp_n = st.slider("Comps to show:", 3, 15, 8, key="comp_n_slider")
+            with cc2:
+                comp_bucket = st.radio("Position group for weighting:", comp_bucket_options,
+                                       index=comp_bucket_options.index(auto_bucket),
+                                       horizontal=True, key="comp_bucket_radio")
+
+            top_matches, dominant_cat = find_stat_comps(
+                current_player, df_all, card_benchmarks, n=comp_n, bucket_override=comp_bucket
+            )
+
+            boost_note = f" boosted toward this player's real-stat strength: **{dominant_cat}**" if dominant_cat else ""
+            st.write(f"**Top {len(top_matches)} comps from {len(df_all):,} current-season players** "
+                     f"— height ±5in, weighted by **{comp_bucket}** profile{boost_note}, "
+                     f"conference tier nudges the ranking.")
+
+            if not top_matches:
+                st.info("No close height/stat matches found in the current season database.")
+            else:
+                for match_score, match_data in top_matches:
+                    pct = round(match_score * 100, 1)
+                    c_name = str(match_data.get("PLAYER", ""))
+                    c_team = str(match_data.get("TEAM", ""))
+                    c_conf = str(match_data.get("CONF", ""))
+                    c_ht   = str(match_data.get("HEIGHT", ""))
+                    c_bpm  = float(match_data.get("BPM", 0))
+                    c_usg  = float(match_data.get("USG", 0))
+                    c_efg  = float(match_data.get("EFG", 0))
+                    c_ts   = float(match_data.get("TS", 0))
+                    c_ts   = c_ts * 100 if c_ts <= 1.0 else c_ts
+                    c_ast  = float(match_data.get("AST", 0))
+
+                    html = (
+                        "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
+                        "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
+                        "<div>"
+                        "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
+                        "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht + " &middot; " + c_team + " (" + c_conf + ")</div>"
+                        "</div>"
+                        "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
+                        "</div>"
+                        "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ts:.1f}%" + "</div>"
+                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">TS%</div>"
+                        "</div>"
+                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_usg:.1f}%" + "</div>"
+                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">USG%</div>"
+                        "</div>"
+                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_efg:.1f}%" + "</div>"
+                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">eFG%</div>"
+                        "</div>"
+                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_bpm:.1f}" + "</div>"
+                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">BPM</div>"
+                        "</div>"
+                        "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
+                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ast:.1f}%" + "</div>"
+                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div>"
+                        "</div>"
+                        "</div>"
+                        "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
+                        "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
+                        "</div>"
+                        "</div>"
+                    )
+                    st.markdown(html, unsafe_allow_html=True)
+
+    st.divider()
+
+    st.write("**Detailed Scouting Report**")
+    col_scout, col_pos, col_role = st.columns(3)
     with col_scout:
         scout_input = st.text_input("Assigned Staff Member / Scout Name:", value=saved_scout)
-    with col_tier:
-        tier_input = st.selectbox("Recruitment Board Category Hierarchy:", ["High Priority", "Watchlist", "Pass"],
-                                  index=["High Priority", "Watchlist", "Pass"].index(saved_tier))
-
-    st.write("**Roster Alignment & Structural Role Classification**")
-    col_pos, col_role = st.columns(2)
     with col_pos:
         position_list = ["PG", "CG", "W", "F", "C"]
         pos_idx = position_list.index(saved_pos) if saved_pos in position_list else 0
@@ -1672,27 +2373,238 @@ with tab1:
     notes_input = st.text_area("Detailed Background Intel, Character Evaluations, and General Notes:",
                                value=saved_notes, height=150)
 
-    if st.button("Commit Intel to Board"):
+    if st.button("Save Scouting Report"):
         execution_date = datetime.now().strftime("%Y-%m-%d")
         final_photo = photo_input if photo_input else fetch_sr_headshot_silent(current_player, p_data["TEAM"])
         conn = sqlite3.connect('scouting_hub.db')
         cursor = conn.cursor()
         cursor.execute('''
                        INSERT INTO player_notes (player_name, team_name, scout_name, priority_tier, position, role,
-                                                 rumored_nil, personal_val, agent, agency, photo_url, eval_date, notes)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(player_name) DO
+                                                 rumored_nil, personal_val, agent, agency, photo_url, eval_date,
+                                                 notes, value_tag)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(player_name) DO
                        UPDATE SET
                            scout_name=excluded.scout_name, priority_tier=excluded.priority_tier,
                            position=excluded.position, role=excluded.role, rumored_nil=excluded.rumored_nil,
                            personal_val=excluded.personal_val, agent=excluded.agent, agency=excluded.agency,
-                           photo_url=excluded.photo_url, eval_date=excluded.eval_date, notes=excluded.notes
+                           photo_url=excluded.photo_url, eval_date=excluded.eval_date, notes=excluded.notes,
+                           value_tag=excluded.value_tag
                        ''',
-                       (current_player, p_data["TEAM"], scout_input, tier_input, position_input, role_input,
-                        nil_input, val_input, agent_input, agency_input, final_photo, execution_date, notes_input))
+                       (current_player, p_data["TEAM"], scout_input, board_tier, position_input, role_input,
+                        nil_input, val_input, agent_input, agency_input, final_photo, execution_date,
+                        notes_input, board_value_tag))
         conn.commit()
         conn.close()
-        st.success(f"Intel dynamically updated for {current_player}.")
+        st.success(f"Scouting report saved for {current_player}.")
         st.rerun()
+
+
+# ==========================================
+# TAB: ONE PAGER (PRINTABLE PLAYER SHEET)
+# ==========================================
+with tab_onepager:
+    st.subheader("Printable One Pager")
+    st.caption(
+        "Shows the currently active player (set from the Depth Chart, Portal Discovery Engine, or "
+        "Front Office Target Board). Click into the sheet to add notes, then use the print button."
+    )
+
+    op_player = st.session_state.active_player
+    op_match = df_all[df_all["PLAYER"] == op_player]
+    op_stats = op_match.iloc[0] if not op_match.empty else None
+
+    conn = sqlite3.connect('scouting_hub.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT team_name, position, agent, photo_url, notes, scout_name "
+        "FROM player_notes WHERE player_name = ?", (op_player,)
+    )
+    op_note_row = cursor.fetchone()
+    op_roster_row = cursor.execute(
+        "SELECT position, height, class_yr FROM roster WHERE bt_name = ? OR player_name = ?",
+        (op_player, op_player)
+    ).fetchone()
+    conn.close()
+
+    op_team = (
+        (op_note_row[0] if op_note_row and op_note_row[0] else None)
+        or (op_stats["TEAM"] if op_stats is not None else None)
+        or "—"
+    )
+    op_pos = (
+        (op_roster_row[0] if op_roster_row and op_roster_row[0] else None)
+        or (op_note_row[1] if op_note_row and op_note_row[1] else None)
+        or "—"
+    )
+    op_height = (
+        (op_roster_row[1] if op_roster_row and op_roster_row[1] else None)
+        or (op_stats["HEIGHT"] if op_stats is not None else None)
+        or "—"
+    )
+    op_class = (
+        (op_roster_row[2] if op_roster_row and op_roster_row[2] else None)
+        or (op_stats["CLASS"] if op_stats is not None else None)
+        or "—"
+    )
+    op_agent = (op_note_row[2] if op_note_row and op_note_row[2] else None) or "—"
+    op_scout = (op_note_row[5] if op_note_row and op_note_row[5] else "")
+    op_notes_raw = (op_note_row[4] if op_note_row and op_note_row[4] else "").strip()
+    op_photo = (op_note_row[3] if op_note_row and op_note_row[3] else "") or fetch_sr_headshot_silent(
+        op_player, op_team if op_team != "—" else ""
+    )
+
+    banner_lines = [ln.strip() for ln in op_notes_raw.split("\n") if ln.strip()][:3]
+    banner_bullets_html = "".join(f'<li contenteditable="true">{ln}</li>' for ln in banner_lines)
+    banner_bullets_html += '<li contenteditable="true"></li>'
+
+    def _op_num(v, d=1):
+        try:
+            return f"{float(v):.{d}f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    def _op_pct(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return "—"
+        return f"{v:.1f}%" if v else "—"
+
+    if op_stats is not None:
+        stats_table_html = f"""
+        <table class="stats">
+          <thead><tr>
+            <th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th>
+            <th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>
+            <th>AST%</th><th>OR%</th><th>DR%</th><th>BLK%</th><th>STL%</th>
+          </tr></thead>
+          <tbody><tr>
+            <td>Season</td>
+            <td>{_op_num(op_stats.get('GP'), 0)}</td>
+            <td>{_op_num(op_stats.get('MPG'))}</td>
+            <td>{_op_num(op_stats.get('PPG'))}</td>
+            <td>{_op_num(op_stats.get('RPG'))}</td>
+            <td>{_op_num(op_stats.get('APG'))}</td>
+            <td>{_op_pct(op_stats.get('EFG'))}</td>
+            <td>{_op_pct(op_stats.get('TS'))}</td>
+            <td>{_op_pct(op_stats.get('TWO_P'))}</td>
+            <td>{_op_pct(op_stats.get('THREE_P'))}</td>
+            <td>{_op_pct(op_stats.get('USG'))}</td>
+            <td>{_op_pct(op_stats.get('AST'))}</td>
+            <td>{_op_pct(op_stats.get('OR'))}</td>
+            <td>{_op_pct(op_stats.get('DR'))}</td>
+            <td>{_op_pct(op_stats.get('BLK'))}</td>
+            <td>{_op_pct(op_stats.get('STL'))}</td>
+          </tr></tbody>
+        </table>
+        """
+    else:
+        stats_table_html = (
+            '<div style="font-family:Arimo,sans-serif;font-size:12px;color:#8494a5;">'
+            'No BartTorvik stat line available for this player yet.</div>'
+        )
+
+    staff_notes_html = "".join('<li contenteditable="true"></li>' for _ in range(5))
+    photo_style = f"background-image:url('{op_photo}');" if op_photo else ""
+
+    one_pager_html = f"""
+<!doctype html><html><head><meta charset="UTF-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700;800&family=Arimo:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {{ --navy: #1b3a5c; --banner-blue: #3a6ea8; --ink: #1b3a5c; --rule: #1b3a5c; --paper: #ffffff; }}
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ background: #e8e8e8; font-family: 'Spectral', Georgia, serif; color: var(--ink); padding: 24px 0; }}
+  .toolbar {{ max-width: 8.5in; margin: 0 auto 14px; display: flex; justify-content: flex-end; gap: 8px; padding: 0 8px; }}
+  .toolbar button {{ font-family: 'Arimo', Arial, sans-serif; font-size: 13px; font-weight: 700; padding: 8px 16px;
+    border: none; border-radius: 4px; cursor: pointer; background: var(--navy); color: #fff; }}
+  .toolbar button.secondary {{ background: #6b7c8f; }}
+  .page {{ width: 8.5in; min-height: 11in; margin: 0 auto; background: var(--paper); padding: 0.45in 0.5in 0.5in;
+    box-shadow: 0 2px 14px rgba(0,0,0,0.18); }}
+  .banner {{ background: var(--banner-blue); color: #fff; padding: 22px 26px 20px; display: flex;
+    justify-content: space-between; align-items: flex-start; border-bottom: 3px solid var(--navy); }}
+  .banner h1 {{ font-size: 40px; font-weight: 600; line-height: 1.05; margin-bottom: 10px; letter-spacing: 0.2px; }}
+  .facts {{ font-size: 15.5px; font-weight: 700; line-height: 1.5; }}
+  .facts span.lbl {{ font-weight: 400; opacity: 0.85; }}
+  .banner-notes {{ list-style: none; margin-top: 12px; font-size: 13.5px; font-weight: 400; line-height: 1.4; max-width: 5.4in; }}
+  .banner-notes li {{ padding-left: 20px; position: relative; margin-bottom: 4px; outline: none; }}
+  .banner-notes li::before {{ content: "\\2756"; position: absolute; left: 0; font-size: 10px; opacity: 0.85; }}
+  .banner-notes li:empty::after {{ content: "Click to add profile note..."; opacity: 0.5; }}
+  .headshot {{ width: 130px; height: 130px; border-radius: 6px; background-color: #dce6f2; background-size: cover;
+    background-position: center; display: flex; align-items: center; justify-content: center;
+    font-family: 'Arimo', sans-serif; font-size: 11px; color: #4a6a94; flex-shrink: 0; margin-left: 20px; }}
+  .sec {{ display: flex; align-items: center; gap: 18px; margin: 26px 0 10px; }}
+  .sec h2 {{ font-size: 26px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }}
+  .sec .rule {{ flex: 1; height: 5px; background: var(--rule); max-width: 55%; }}
+  .statline {{ font-family: 'Arimo', Arial, sans-serif; font-size: 12px; font-weight: 700; margin-bottom: 6px; }}
+  table.stats {{ width: 100%; border-collapse: collapse; font-family: 'Arimo', Arial, sans-serif; font-size: 12.5px; }}
+  table.stats th {{ font-weight: 700; text-align: right; padding: 4px 5px; border-bottom: 1px solid #b9c4cf; color: #33475c; }}
+  table.stats th:first-child {{ text-align: left; }}
+  table.stats td {{ text-align: right; padding: 5px; border-bottom: 1px solid #dfe5ea; color: #22384e; }}
+  table.stats td:first-child {{ text-align: left; font-weight: 400; }}
+  .notes-hint {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-bottom: 6px; }}
+  ul.notes {{ list-style: none; font-size: 17px; line-height: 1.45; }}
+  ul.notes li {{ padding-left: 30px; position: relative; margin-bottom: 9px; outline: none; }}
+  ul.notes li::before {{ content: "\\2756"; position: absolute; left: 4px; color: var(--navy); font-size: 14px; }}
+  ul.notes li:empty::after {{ content: "Click to add note..."; color: #b6c1cc; }}
+  .attribution {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-top: 4px; font-style: italic; }}
+  .footer-line {{ margin-top: 34px; font-size: 24px; font-weight: 700; letter-spacing: 0.3px; }}
+  .footer-line.underline {{ text-decoration: underline; margin-bottom: 8px; }}
+  @media print {{
+    body {{ background: #fff; padding: 0; }}
+    .toolbar {{ display: none; }}
+    .page {{ box-shadow: none; width: auto; min-height: auto; padding: 0.25in 0.35in; }}
+    .notes-hint {{ display: none; }}
+    .banner-notes li:empty, ul.notes li:empty {{ display: none; }}
+    .banner {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    .sec .rule {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  }}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button class="secondary" onclick="addNote()">+ Add Note</button>
+  <button onclick="window.print()">Print One Pager</button>
+</div>
+<div class="page">
+  <div class="banner">
+    <div>
+      <h1>{op_player}</h1>
+      <div class="facts">
+        <span class="lbl">Current Team:</span> {op_team}<br>
+        <span class="lbl">Height:</span> {op_height}<br>
+        <span class="lbl">Class:</span> {op_class} &nbsp;&bull;&nbsp; <span class="lbl">Pos:</span> {op_pos}<br>
+        <span class="lbl">Agent:</span> {op_agent}
+      </div>
+      <ul class="banner-notes">{banner_bullets_html}</ul>
+    </div>
+    <div class="headshot" style="{photo_style}"></div>
+  </div>
+
+  <div class="sec"><h2>STATS</h2><div class="rule"></div></div>
+  <div class="statline">{op_player} &bull; {op_pos} &bull; {op_height} &bull; {op_class}</div>
+  {stats_table_html}
+
+  <div class="sec"><h2>STAFF NOTES</h2><div class="rule"></div></div>
+  <div class="notes-hint">Assistants: click any bullet to type. Use + Add Note for more lines. Empty bullets are hidden when printed.</div>
+  <ul class="notes" id="notesList">{staff_notes_html}</ul>
+  <div class="attribution" contenteditable="true">Notes by: {op_scout}</div>
+
+  <div class="footer-line underline" contenteditable="true">HIGHLIGHTS ON iPAD</div>
+  <div class="footer-line" contenteditable="true">TWO FULL GAMES READY TO PUT ON iPAD</div>
+</div>
+<script>
+  function addNote() {{
+    const li = document.createElement('li');
+    li.contentEditable = 'true';
+    document.getElementById('notesList').appendChild(li);
+    li.focus();
+  }}
+</script>
+</body>
+</html>
+"""
+    components.html(one_pager_html, height=1300, scrolling=True)
 
 
 # ==========================================
@@ -1832,6 +2744,8 @@ with tab2:
             st.session_state.active_player = clicked_player
             st.session_state.go_to_profile = True
             st.rerun()
+        st.caption(f"🎯 **{clicked_player}** selected — their full card is loaded on the "
+                   f"**Player Card** and **One Pager** tabs.")
 
 
 # ==========================================
@@ -1844,27 +2758,63 @@ with tab3:
         SELECT player_name AS PLAYER, team_name AS TEAM, position AS POS, role AS ROLE,
                agent AS AGENT, agency AS AGENCY, rumored_nil AS [RUMORED NIL],
                personal_val AS [OUR VALUE], eval_date AS [LOG DATE],
-               scout_name AS SCOUT, notes AS NOTES, priority_tier AS TIER
+               scout_name AS SCOUT, notes AS NOTES, priority_tier AS TIER,
+               value_tag AS [VALUE TAG]
         FROM player_notes
+        WHERE priority_tier IS NOT NULL AND priority_tier != ''
     ''', conn)
     conn.close()
 
+    VALUE_TAG_COLORS = {"Undervalued": "#16a34a", "Overvalued": "#dc2626", "Properly Valued": "#64748B"}
+
     if db_df.empty:
-        st.info("No targets currently logged onto the system database.")
+        st.info("No targets currently logged onto the system database. Use the **Add to Board** "
+                 "widget on the Player Card tab to log one.")
     else:
-        for tier in ["High Priority", "Watchlist", "Pass"]:
-            st.markdown(f"### {tier}")
+        card_benchmarks_board = build_national_benchmarks(df_all)
+        for tier in ["High Priority", "Mid Priority", "Low Priority"]:
             tier_filtered = db_df[db_df["TIER"] == tier]
+            st.markdown(f"### {tier} ({len(tier_filtered)})")
             if tier_filtered.empty:
                 st.write("*No targets assigned to this category tier.*")
-            else:
-                event_board = st.dataframe(tier_filtered.drop(columns=["TIER"]), hide_index=True,
-                                           on_select="rerun", selection_mode="single-row", key=f"board_{tier}")
-                if event_board.selection.rows:
-                    clicked_idx = event_board.selection.rows[0]
-                    clicked_player = tier_filtered.iloc[clicked_idx]["PLAYER"]
-                    if st.session_state.active_player != clicked_player:
-                        st.session_state.active_player = clicked_player
+                continue
+
+            for _, row in tier_filtered.iterrows():
+                p_name = row["PLAYER"]
+                v_tag = row["VALUE TAG"] if row["VALUE TAG"] else "Properly Valued"
+                v_color = VALUE_TAG_COLORS.get(v_tag, "#64748B")
+
+                with st.expander(f"{p_name}  ·  {row['TEAM'] or '—'}  ·  {v_tag}"):
+                    badge_html = (
+                        f"<span style='background:{v_color}1A;color:{v_color};border:1px solid {v_color}55;"
+                        f"padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;'>{v_tag.upper()}</span>"
+                    )
+                    if row["SCOUT"]:
+                        badge_html += (f"&nbsp;&nbsp;<span style='font-size:12px;color:#475569;'>"
+                                       f"Scout: {row['SCOUT']}</span>")
+                    st.markdown(badge_html, unsafe_allow_html=True)
+                    if row["ROLE"]:
+                        st.caption(f"Role: {row['ROLE']}")
+                    if row["NOTES"]:
+                        st.write(row["NOTES"])
+
+                    match_row = df_all[df_all["PLAYER"] == p_name]
+                    curated_row = next((p for p in PORTAL_PLAYERS if p["name"] == p_name), None)
+                    card_p = curated_row or {
+                        "name": p_name,
+                        "school": row["TEAM"] or (match_row.iloc[0]["TEAM"] if not match_row.empty else ""),
+                        "pos": row["POS"] or "",
+                        "cls": match_row.iloc[0]["CLASS"] if not match_row.empty else "",
+                        "height": match_row.iloc[0]["HEIGHT"] if not match_row.empty else "",
+                        "tier": tier, "projection": "", "role": row["ROLE"] or "", "tags": [],
+                    }
+                    components.html(
+                        render_tile_card_html(card_p, df_all, card_benchmarks_board, show_writeup=False),
+                        height=760, scrolling=True,
+                    )
+
+                    if st.button(f"Open full Player Card", key=f"goto_{tier}_{p_name}"):
+                        st.session_state.active_player = p_name
                         st.session_state.go_to_profile = True
                         st.rerun()
 
@@ -1876,7 +2826,8 @@ with tab4:
     st.subheader("Staff Roster Print Layout")
     st.write("Clean card formatting optimized for direct browser printing (File -> Print).")
 
-    filter_tier = st.selectbox("Select Target Priority Tier to Display:", ["High Priority", "Watchlist", "All Records"])
+    filter_tier = st.selectbox("Select Target Priority Tier to Display:",
+                               ["High Priority", "Mid Priority", "Low Priority", "All Records"])
 
     conn = sqlite3.connect('scouting_hub.db')
     if filter_tier == "All Records":
@@ -2298,4 +3249,3 @@ with tab5:
                                     "</div>"
                                 )
                                 st.markdown(html, unsafe_allow_html=True)
-
