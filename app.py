@@ -401,6 +401,14 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
             where = f"AND CAST(p.opp_rank AS INTEGER) <= {int(max_opp_rank)} AND CAST(p.opp_rank AS INTEGER) < 999"
         else:
             where = ""
+        # ortg_kp/usage_kp only exist once a KenPom build script has run (it ALTER TABLEs them
+        # in) — fall back to NULL on fresh installs instead of crashing on "no such column".
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(player_game_logs)")}
+        if "ortg_kp" in cols and "usage_kp" in cols:
+            kp_select = ("ROUND(AVG(CASE WHEN p.ortg_kp IS NOT NULL THEN p.ortg_kp END), 1) AS ORTG_KP,\n"
+                         "                ROUND(AVG(CASE WHEN p.usage_kp IS NOT NULL THEN p.usage_kp END), 1) AS USAGE_KP")
+        else:
+            kp_select = "NULL AS ORTG_KP,\n                NULL AS USAGE_KP"
         df = pd.read_sql_query(f"""
             SELECT
                 p.player_name                                                    AS PLAYER,
@@ -437,8 +445,7 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
                     NULLIF(SUM(t.opp_fga)-SUM(t.opp_fg3a), 0), 1)               AS BLK_PCT,
                 ROUND(SUM(CASE WHEN t.possessions IS NOT NULL THEN p.stl END)*100.0 /
                     NULLIF(SUM(t.possessions), 0), 1)                            AS STL_PCT,
-                ROUND(AVG(CASE WHEN p.ortg_kp IS NOT NULL THEN p.ortg_kp END), 1) AS ORTG_KP,
-                ROUND(AVG(CASE WHEN p.usage_kp IS NOT NULL THEN p.usage_kp END), 1) AS USAGE_KP
+                {kp_select}
             FROM player_game_logs p
             LEFT JOIN game_team_stats t
                 ON t.team_espn_id = p.team_espn_id AND t.game_date = p.game_date
@@ -2812,4 +2819,3 @@ with tab4:
                             "</div>",
                             unsafe_allow_html=True
                         )
-
