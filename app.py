@@ -457,64 +457,6 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=600)
-def load_p5_percentile_benchmarks(_df_all: pd.DataFrame, max_opp_rank=None) -> dict:
-    """
-    Returns {pos_group: {stat: sorted_list}} for P5 players.
-    Used to percentile-rank any player's stats against same-position P5 peers.
-    """
-    try:
-        # Guard: don't build benchmarks until player ORB/DRB data is populated
-        conn0 = sqlite3.connect("scouting_hub.db")
-        orb_rows = conn0.execute("SELECT COUNT(*) FROM player_game_logs WHERE orb > 0").fetchone()[0]
-        conn0.close()
-        if orb_rows < 50000:
-            return {}
-
-        all_box = load_consistent_boxscore_stats(max_opp_rank)
-        if all_box.empty:
-            return {}
-
-        conn = sqlite3.connect("scouting_hub.db")
-        rankings = pd.read_sql_query("SELECT espn_id, bart_name FROM team_rankings", conn)
-        positions = pd.read_sql_query("SELECT player_name, position_group FROM player_positions", conn)
-        conn.close()
-
-        p5_bart_teams = set(_df_all[_df_all["CONF"].isin(P5_CONFS)]["TEAM"].unique())
-        p5_espn_ids   = set(rankings[rankings["bart_name"].isin(p5_bart_teams)]["espn_id"].tolist())
-
-        p5 = all_box[all_box["team_espn_id"].isin(p5_espn_ids)].copy()
-        p5 = p5.merge(positions, left_on="PLAYER", right_on="player_name", how="left")
-        p5["position_group"] = p5["position_group"].fillna("Wing")
-
-        STAT_COLS = ["PPG", "TS", "EFG", "TWO_P", "THREE_P", "FT_PCT",
-                     "FTR", "USG", "AST_PCT", "OR_PCT", "DR_PCT", "BLK_PCT", "STL_PCT",
-                     "ORTG_KP", "USAGE_KP"]
-        benchmarks = {}
-        for grp in ("Guard", "Wing", "Big"):
-            sub = p5[p5["position_group"] == grp]
-            benchmarks[grp] = {
-                col: sorted(sub[col].dropna().tolist())
-                for col in STAT_COLS if col in sub.columns
-            }
-        return benchmarks
-    except Exception:
-        return {}
-
-
-def get_player_position_group(player_name: str) -> str:
-    try:
-        conn = sqlite3.connect("scouting_hub.db")
-        row = conn.execute(
-            "SELECT position_group FROM player_positions WHERE player_name = ?",
-            (player_name,)
-        ).fetchone()
-        conn.close()
-        return row[0] if row else "Wing"
-    except Exception:
-        return "Wing"
-
-
 def get_pct(val, sorted_vals: list):
     if not sorted_vals or val is None or (isinstance(val, float) and math.isnan(val)):
         return None
@@ -542,31 +484,6 @@ def pct_color(pct):
     lum = 0.299 * r + 0.587 * g + 0.114 * b
     text = "#FFFFFF" if lum < 148 else "#1A1A1A"
     return f"#{r:02x}{g:02x}{b:02x}", text
-
-
-def render_pct_stat_cards(cards: list, per_row: int = 4):
-    """
-    Render colored stat cards.
-    cards = list of (label, value_str, percentile_0_100 | None)
-    Background: blue (0th pct) → white (50th) → gold (100th). Gray if None.
-    """
-    for row_start in range(0, len(cards), per_row):
-        row_cards = cards[row_start: row_start + per_row]
-        cols = st.columns(per_row)
-        for col, (label, val, pct) in zip(cols, row_cards):
-            bg, fg = pct_color(pct)
-            pct_label = f" ({pct:.0f}th)" if pct is not None else ""
-            col.markdown(
-                f"""<div style="background:{bg};border-radius:8px;padding:11px 6px 9px;
-                    text-align:center;margin:3px 0;min-height:60px;">
-                  <div style="font-size:9.5px;color:{fg};opacity:0.9;font-weight:500;
-                    letter-spacing:0.3px;line-height:1.2;">{label}</div>
-                  <div style="font-size:17px;font-weight:700;color:{fg};margin-top:4px;
-                    line-height:1;">{val}</div>
-                  <div style="font-size:8px;color:{fg};opacity:0.75;margin-top:2px;">{pct_label}</div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
 
 
 @st.cache_data(ttl=3600)
@@ -855,6 +772,80 @@ def parse_height_inches(ht_str):
         return 78
 
 
+SHOT_ZONE_FREQ_STATS = ["PCT_RIM", "PCT_MID", "PCT_THREE"]
+SHOT_ZONE_EFF_STATS = ["RIM_FG_PCT", "MID_FG_PCT", "THREE_FG_PCT"]
+SHOT_ZONE_STATS = SHOT_ZONE_FREQ_STATS + SHOT_ZONE_EFF_STATS
+SHOT_ZONE_MIN_ATTEMPTS = 15  # need a real sample before trusting a player's shot-selection profile
+
+
+@st.cache_data(ttl=3600)
+def build_shot_zone_profiles() -> pd.DataFrame:
+    """
+    Per-player shot profile from shot_chart: what share of a player's field-goal attempts come
+    from the rim, mid-range, and three (shot selection), plus their FG% from each of those zones
+    (efficiency) — i.e. both where they score from and how well. Used to make the comp finder
+    account for real shot profile, not just overall shooting %.
+    """
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query("""
+            SELECT player_name AS PLAYER, team_id, scoring_play AS made,
+                   coord_x_norm AS x, coord_y_norm AS y, points_attempted AS pts
+            FROM shot_chart
+            WHERE shot_type != 'MadeFreeThrow' AND coord_x_norm IS NOT NULL AND coord_y_norm IS NOT NULL
+        """, conn)
+        rankings = pd.read_sql_query("SELECT espn_id, bart_name FROM team_rankings", conn)
+        conn.close()
+        if df.empty:
+            return pd.DataFrame()
+
+        dist = ((df["x"] - 25.0) ** 2 + (df["y"] - 5.25) ** 2) ** 0.5
+        df["zone"] = np.where(df["pts"] == 3, "THREE", np.where(dist <= 4.0, "RIM", "MID"))
+
+        grp = df.groupby(["PLAYER", "team_id", "zone"])
+        attempts = grp.size().unstack(fill_value=0)
+        makes = grp["made"].sum().unstack(fill_value=0)
+        for z in ("RIM", "MID", "THREE"):
+            if z not in attempts.columns:
+                attempts[z] = 0
+            if z not in makes.columns:
+                makes[z] = 0
+        total = attempts[["RIM", "MID", "THREE"]].sum(axis=1)
+
+        def fg_pct(zone):
+            a = attempts[zone]
+            return np.where(a > 0, makes[zone] / a.replace(0, np.nan) * 100, np.nan)
+
+        profile = pd.DataFrame({
+            "PLAYER":        attempts.index.get_level_values("PLAYER"),
+            "team_id":       attempts.index.get_level_values("team_id"),
+            "PCT_RIM":       (attempts["RIM"]   / total * 100).values,
+            "PCT_MID":       (attempts["MID"]   / total * 100).values,
+            "PCT_THREE":     (attempts["THREE"] / total * 100).values,
+            "RIM_FG_PCT":    fg_pct("RIM"),
+            "MID_FG_PCT":    fg_pct("MID"),
+            "THREE_FG_PCT":  fg_pct("THREE"),
+        })
+        profile = profile[total.values >= SHOT_ZONE_MIN_ATTEMPTS]
+
+        team_map = dict(zip(rankings["espn_id"].astype(str), rankings["bart_name"]))
+        profile["TEAM"] = profile["team_id"].astype(str).map(team_map)
+        return profile.dropna(subset=["TEAM"])
+    except Exception:
+        return pd.DataFrame()
+
+
+def merge_shot_zones(df_all: pd.DataFrame) -> pd.DataFrame:
+    """df_all + shot-zone columns where available (NaN elsewhere — handled gracefully downstream)."""
+    zone_profile = build_shot_zone_profiles()
+    if zone_profile.empty:
+        return df_all
+    return df_all.merge(
+        zone_profile[["PLAYER", "TEAM"] + SHOT_ZONE_STATS],
+        on=["PLAYER", "TEAM"], how="left"
+    )
+
+
 # ---- national percentile benchmarks (BartTorvik, all D1) for the tile card front ----
 NATIONAL_PCT_STATS = ["PRPG", "BPM", "OBPM", "DBPM", "ORTG", "USG", "EFG", "TS",
                        "TWO_P", "THREE_P", "FTR", "FT_PCT", "AST", "TO", "OR", "DR",
@@ -865,11 +856,11 @@ NATIONAL_LOWER_IS_BETTER = {"TO"}
 @st.cache_data(ttl=3600)
 def build_national_benchmarks(df_all: pd.DataFrame) -> dict:
     """Sorted national value lists per stat, used to percentile-rank any player for the tile card."""
-    d = df_all.copy()
+    d = merge_shot_zones(df_all.copy())
     if "AST" in d.columns and "TO" in d.columns:
         d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
     benchmarks = {}
-    for col in NATIONAL_PCT_STATS + ["AST_TO"]:
+    for col in NATIONAL_PCT_STATS + ["AST_TO"] + SHOT_ZONE_STATS:
         if col in d.columns:
             benchmarks[col] = sorted(d[col].dropna().tolist())
     return benchmarks
@@ -1018,9 +1009,10 @@ def get_synergy_card_data(player_name: str):
 
 def _tile_html(label, value, pct):
     bg, fg = pct_color(pct)
+    pct_label = f'<div class="p" style="color:{fg};opacity:.7;">({pct:.0f}th)</div>' if pct is not None else ""
     return (f'<div class="tile" style="background:{bg}">'
             f'<div class="k" style="color:{fg};opacity:.72;">{label}</div>'
-            f'<div class="v" style="color:{fg};">{value}</div></div>')
+            f'<div class="v" style="color:{fg};">{value}</div>{pct_label}</div>')
 
 
 def _tile_group_html(group_label, tiles):
@@ -1036,56 +1028,6 @@ POS_TAG_BUCKET = {
     "PF/C": "Big", "C": "Big",
 }
 
-POSITION_METRIC_GROUPS = {
-    "Guard": ("GUARD METRICS", [("AST", "AST%", "%"), ("TO", "TOV%", "%"),
-                                 ("THREE_P", "3P%", "%"), ("STL", "STL%", "%")]),
-    "Wing":  ("WING METRICS",  [("THREE_P", "3P%", "%"), ("STL", "STL%", "%"),
-                                 ("BPM", "BPM", ""), ("DBPM", "DBPM", "")]),
-    "Big":   ("BIG METRICS",   [("BLK", "BLK%", "%"), ("OR", "OR%", "%"),
-                                 ("DR", "DR%", "%"), ("BPM", "BPM", "")]),
-}
-
-
-def build_general_tiles(stats_row):
-    """Plain per-game/season box-score tiles for the card front — no percentile coloring."""
-    def g(stat, label, decimals=1, suffix=""):
-        val = stats_row.get(stat)
-        try:
-            display = f"{float(val):.{decimals}f}{suffix}"
-        except (TypeError, ValueError):
-            display = "—"
-        return (label, display)
-
-    return [
-        g("PPG", "PTS"), g("RPG", "REB"), g("APG", "AST"),
-        g("TWO_P", "2PT%", suffix="%"), g("THREE_P", "3PT%", suffix="%"),
-        g("FTR", "FTR"), g("FT_PCT", "FT%", suffix="%"),
-    ]
-
-
-def build_position_tiles(stats_row, bucket):
-    label, specs = POSITION_METRIC_GROUPS.get(bucket, POSITION_METRIC_GROUPS["Wing"])
-    tiles = []
-    for stat, tile_label, suffix in specs:
-        val = stats_row.get(stat)
-        try:
-            display = f"{float(val):.1f}{suffix}"
-        except (TypeError, ValueError):
-            display = "—"
-        tiles.append((tile_label, display))
-    return label, tiles
-
-
-def _flat_tile_html(label, value):
-    return (f'<div class="tile flat">'
-            f'<div class="k">{label}</div><div class="v">{value}</div></div>')
-
-
-def _flat_tile_group_html(group_label, tiles):
-    tiles_html = "".join(_flat_tile_html(l, v) for l, v in tiles)
-    return (f'<div class="grp"><div class="grp-lab">{group_label}</div>'
-            f'<div class="tiles">{tiles_html}</div></div>')
-
 
 # ==========================================
 # UNIVERSAL COMP FINDER — works for any player, not just curated portal targets.
@@ -1095,22 +1037,32 @@ def _flat_tile_group_html(group_label, tiles):
 # tier nudge (P5 vs non-P5) so comps skew toward players facing similar competition.
 # ==========================================
 COMP_CATEGORY_STATS = {
-    "Shooting":   ["THREE_P", "TWO_P", "TS", "EFG", "FT_PCT"],
-    "Playmaking": ["AST", "TO"],
-    "Rebounding": ["OR", "DR"],
-    "Defense":    ["BLK", "STL", "DBPM"],
+    "Shooting":     ["THREE_P", "TWO_P", "TS", "EFG", "FT_PCT"],
+    "Playmaking":   ["AST", "TO"],
+    "Rebounding":   ["OR", "DR"],
+    "Defense":      ["BLK", "STL", "DBPM"],
+    "Shot Profile": SHOT_ZONE_STATS,
 }
 
+# PCT_RIM/PCT_MID/PCT_THREE = shot-selection profile (where a player actually scores from), and
+# *_FG_PCT = their real FG% from each of those zones (how well) — both from real shot-chart data.
+# A real comp needs to account for this, not just overall shooting %.
 COMP_BASE_WEIGHTS = {
     "Guard": {"ORTG": 0.13, "AST": 0.12, "TO": 0.09, "STL": 0.09, "MIN_PCT": 0.07, "THREE_P": 0.08,
               "TS": 0.06, "BPM": 0.06, "USG": 0.05, "EFG": 0.04, "OBPM": 0.03, "DBPM": 0.03,
-              "OR": 0.02, "DR": 0.03, "BLK": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08},
+              "OR": 0.02, "DR": 0.03, "BLK": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08,
+              "PCT_THREE": 0.06, "PCT_RIM": 0.03, "PCT_MID": 0.02,
+              "THREE_FG_PCT": 0.04, "RIM_FG_PCT": 0.02, "MID_FG_PCT": 0.02},
     "Wing":  {"BPM": 0.13, "DBPM": 0.09, "STL": 0.09, "BLK": 0.09, "DR": 0.09, "OR": 0.07,
               "TS": 0.05, "EFG": 0.04, "THREE_P": 0.05, "AST": 0.04, "USG": 0.04, "ORTG": 0.04,
-              "TO": 0.03, "OBPM": 0.04, "MIN_PCT": 0.04, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08},
+              "TO": 0.03, "OBPM": 0.04, "MIN_PCT": 0.04, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08,
+              "PCT_THREE": 0.05, "PCT_RIM": 0.04, "PCT_MID": 0.02,
+              "THREE_FG_PCT": 0.03, "RIM_FG_PCT": 0.03, "MID_FG_PCT": 0.02},
     "Big":   {"ORTG": 0.11, "OR": 0.11, "DR": 0.11, "BLK": 0.09, "AST": 0.07, "TO": 0.06,
               "MIN_PCT": 0.06, "BPM": 0.06, "TS": 0.05, "USG": 0.04, "EFG": 0.03, "STL": 0.03,
-              "DBPM": 0.03, "OBPM": 0.03, "THREE_P": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08},
+              "DBPM": 0.03, "OBPM": 0.03, "THREE_P": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08,
+              "PCT_RIM": 0.07, "PCT_MID": 0.03, "PCT_THREE": 0.03,
+              "RIM_FG_PCT": 0.05, "MID_FG_PCT": 0.02, "THREE_FG_PCT": 0.02},
 }
 
 CONF_TIER_BONUS = 0.05
@@ -1147,6 +1099,7 @@ def build_comp_weights(bucket, dominant_category):
 def find_stat_comps(player_name, df_all, benchmarks, n=8, bucket_override=None):
     """Real-stat-driven comp finder for any player in df_all. Returns (results, dominant_category)
     where results is a sorted list of (match_score_0_to_1, candidate_row)."""
+    df_all = merge_shot_zones(df_all)
     match = df_all[df_all["PLAYER"] == player_name]
     if match.empty:
         return [], None
@@ -1188,6 +1141,20 @@ def find_stat_comps(player_name, df_all, benchmarks, n=8, bucket_override=None):
     return results[:n], dominant_category
 
 
+def build_general_tiles(stats_row):
+    """Basic per-game counting stats — no percentile benchmark for these, shown plain."""
+    def plain(stat_key, label):
+        try:
+            v = float(stats_row[stat_key])
+            if math.isnan(v):
+                raise ValueError
+        except (TypeError, ValueError, KeyError):
+            return (label, "—", None)
+        return (label, fmt(v), None)
+
+    return [plain("PPG", "PPG"), plain("RPG", "RPG"), plain("APG", "APG")]
+
+
 def render_tile_card_html(player, df_all, benchmarks, show_writeup=False):
     name       = player.get("name", "")
     height     = player.get("height", "")
@@ -1204,38 +1171,30 @@ def render_tile_card_html(player, df_all, benchmarks, show_writeup=False):
     bucket = POS_TAG_BUCKET.get(pos_tag, "Wing")
     pos_display = pos_tag or pos or bucket
 
-    # ---- FRONT: plain per-game/season box score + position-specific metrics ----
+    # Single continuous view: basic counting stats first, then the percentile-ranked
+    # BartTorvik category breakdown, then Synergy, then tags. No flip needed — the two
+    # used to be split front/back but covered heavily overlapping ground.
     if stats_row is not None:
-        general_tiles = build_general_tiles(stats_row)
-        pos_label, position_tiles = build_position_tiles(stats_row, bucket)
-        front_blocks = (_flat_tile_group_html("GENERAL", general_tiles)
-                         + _flat_tile_group_html(pos_label, position_tiles))
-    else:
-        front_blocks = ('<div class="empty">No BartTorvik stat line found for this '
-                         'player this season.</div>')
-
-    # ---- BACK: BartTorvik percentile tiles + Synergy play-type / shooting profile ----
-    if stats_row is not None:
+        blocks = _tile_group_html("GENERAL", build_general_tiles(stats_row))
         groups = build_torvik_tile_groups(stats_row, benchmarks)
-        back_blocks = "".join(_tile_group_html(g, tiles) for g, tiles in groups)
+        blocks += "".join(_tile_group_html(g, tiles) for g, tiles in groups)
     else:
-        back_blocks = ('<div class="empty">No BartTorvik stat line found for this '
-                        'player this season.</div>')
+        blocks = ('<div class="empty">No BartTorvik stat line found for this '
+                  'player this season.</div>')
 
     play_tiles, shot_tiles = get_synergy_card_data(name)
     if play_tiles:
-        back_blocks += _tile_group_html("SYNERGY PLAY TYPES", play_tiles)
+        blocks += _tile_group_html("SYNERGY PLAY TYPES", play_tiles)
     if shot_tiles:
-        back_blocks += _tile_group_html("SHOOTING PROFILE (SYNERGY)", shot_tiles)
+        blocks += _tile_group_html("SHOOTING PROFILE (SYNERGY)", shot_tiles)
     if not play_tiles and not shot_tiles and stats_row is not None:
-        back_blocks += ('<div class="empty">No Synergy data loaded for this player yet. Run '
-                         'build_synergy_playtypes.py / build_synergy_enriched.py to populate '
-                         'play-type and shooting-profile tiles.</div>')
+        blocks += ('<div class="empty">No Synergy data loaded for this player yet. Run '
+                   'build_synergy_playtypes.py / build_synergy_enriched.py to populate '
+                   'play-type and shooting-profile tiles.</div>')
 
-    # Position / role / main-skill tags — shown on the back, under the advanced stats.
-    # Skill tags combine any hand-curated scouting intel with tags auto-generated from real
-    # percentile stats and Synergy shot/play-type data, so every player gets meaningful tags,
-    # not just the hand-scouted portal targets.
+    # Position / role / main-skill tags. Skill tags combine any hand-curated scouting
+    # intel with tags auto-generated from real percentile stats and Synergy shot/play-type
+    # data, so every player gets meaningful tags, not just the hand-scouted portal targets.
     skill_tags = list(player.get("tags", []))
     if stats_row is not None:
         for t in build_auto_skill_tags(stats_row, benchmarks):
@@ -1249,8 +1208,8 @@ def render_tile_card_html(player, df_all, benchmarks, show_writeup=False):
     if role:
         tag_chips.append(f'<span class="tagchip tagchip-role">{role.upper()}</span>')
     tag_chips += [f'<span class="tagchip">{t}</span>' for t in skill_tags]
-    back_blocks += (f'<div class="grp"><div class="grp-lab">TAGS</div>'
-                     f'<div class="tags">{"".join(tag_chips)}</div></div>')
+    blocks += (f'<div class="grp"><div class="grp-lab">TAGS</div>'
+               f'<div class="tags">{"".join(tag_chips)}</div></div>')
 
     writeup_html = ""
     if show_writeup and player.get("writeup"):
@@ -1280,28 +1239,21 @@ def render_tile_card_html(player, df_all, benchmarks, show_writeup=False):
     color:var(--dim);margin-bottom:8px;text-transform:uppercase;}}
   .tiles{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}}
   .tile{{border-radius:8px;padding:11px 10px 10px;border:1px solid rgba(0,0,0,.04)}}
-  .tile .k{{font-family:'DM Mono',monospace;font-size:8.5px;letter-spacing:.05em;
+  .tile .k{{font-family:'DM Mono',monospace;font-size:10.5px;font-weight:700;letter-spacing:.04em;
     text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
   .tile .v{{font-family:'DM Mono',monospace;font-size:18px;font-weight:600;margin-top:3px;line-height:1;}}
-  .tile.flat{{background:#F1F5F9;}}
-  .tile.flat .k{{color:#64748B;}}
-  .tile.flat .v{{color:#0F172A;}}
+  .tile .p{{font-family:'DM Mono',monospace;font-size:10.5px;font-weight:700;margin-top:2px;}}
   .empty{{font-family:'DM Mono',monospace;font-size:11px;color:var(--dim);padding:16px 0;line-height:1.5;}}
   .tags{{margin-top:8px;}}
-  .tagchip{{background:#e8f1f9;color:#2774AE;font-family:'DM Mono',monospace;font-size:8px;
-    font-weight:600;padding:3px 9px;border-radius:3px;border:1px solid #b8d3ec;margin:2px 4px 2px 0;
-    display:inline-block;text-transform:uppercase;letter-spacing:.04em;}}
+  .tagchip{{background:#e8f1f9;color:#2774AE;font-family:'DM Mono',monospace;font-size:10.5px;
+    font-weight:700;padding:4px 10px;border-radius:3px;border:1px solid #b8d3ec;margin:2px 4px 2px 0;
+    display:inline-block;text-transform:uppercase;letter-spacing:.03em;}}
   .tagchip-pos{{background:#fff7e0;color:#92600a;border-color:#f9d98a;}}
   .tagchip-role{{background:#eafaf1;color:#1a7a4c;border-color:#b8e6cc;}}
   .proj{{margin-top:12px;padding-top:12px;border-top:1px solid var(--edge);}}
   .proj-t{{font-size:12.5px;font-weight:700;color:var(--ink);}}
-  .flipbtn{{font-family:'DM Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.05em;
-    background:#F1F5F9;color:var(--ink);border:1px solid #CBD5E1;border-radius:5px;
-    padding:6px 12px;cursor:pointer;margin-top:10px;}}
-  .flipbtn:hover{{background:#E2E8F0}}
   .writeup{{font-family:'Barlow',sans-serif;font-size:12px;line-height:1.6;color:#374151;
     padding:12px 0 0;}}
-  .back{{display:none}}
 </style>
 </head>
 <body>
@@ -1310,17 +1262,8 @@ def render_tile_card_html(player, df_all, benchmarks, show_writeup=False):
     <div class="title">{name}<span>{pos_display} &middot; {height} &middot; {cls} &middot; {school}</span></div>
     <span class="tier">{tier}</span>
   </div>
-  <div class="front">{front_blocks}</div>
-  <div class="back">{back_blocks}</div>
+  {blocks}
   <div class="proj"><div class="proj-t">{projection}</div></div>
-  <button class="flipbtn" onclick="
-    var c=document.getElementById('{card_id}');
-    var f=c.querySelector('.front'); var b=c.querySelector('.back');
-    var showFront = f.style.display === 'none';
-    f.style.display = showFront ? 'block' : 'none';
-    b.style.display = showFront ? 'none' : 'block';
-    this.textContent = showFront ? '⟲ Advanced (Torvik / Synergy)' : '⟲ General Stats';
-  ">&#10226; Advanced (Torvik / Synergy)</button>
   {writeup_html}
 </div>
 </body>
@@ -2104,7 +2047,7 @@ with tab_card:
     TIER_OPTIONS = ["High Priority", "Mid Priority", "Low Priority"]
     VALUE_TAG_OPTIONS = ["Undervalued", "Properly Valued", "Overvalued"]
 
-    col_img, col_info, col_board = st.columns([1, 3.2, 1.8])
+    col_img, col_info = st.columns([1, 5])
     with col_img:
         if saved_photo:
             st.image(saved_photo, width=130)
@@ -2120,29 +2063,20 @@ with tab_card:
         c4.metric("Height",     p_data["HEIGHT"])
         st.caption(f"📅 **Last Evaluation Update Stamped:** {saved_date}")
 
-    with col_board:
-        st.markdown("**🎯 Front Office Target Board**")
-        board_tier = st.selectbox("Priority", TIER_OPTIONS,
-                                  index=TIER_OPTIONS.index(saved_tier) if saved_tier in TIER_OPTIONS else 1,
-                                  key="board_tier_quick")
-        board_value_tag = st.selectbox("Value Tag", VALUE_TAG_OPTIONS,
-                                       index=VALUE_TAG_OPTIONS.index(saved_value_tag) if saved_value_tag in VALUE_TAG_OPTIONS else 1,
-                                       key="board_value_quick")
-        if st.button("➕ Add to Board", key="add_to_board_quick", width="stretch"):
-            conn = sqlite3.connect('scouting_hub.db')
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO player_notes (player_name, team_name, priority_tier, value_tag) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(player_name) DO UPDATE SET "
-                "priority_tier=excluded.priority_tier, value_tag=excluded.value_tag, team_name=excluded.team_name",
-                (current_player, p_data["TEAM"], board_tier, board_value_tag)
-            )
-            conn.commit()
-            conn.close()
-            st.success(f"Added {current_player} to the {board_tier} board as {board_value_tag}.")
-            st.rerun()
+    st.write("**Player Card — general stats, then BartTorvik / Synergy breakdown by category**")
+    card_benchmarks = build_national_benchmarks(df_all)
+    curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
+    card_player = curated_player or {
+        "name": current_player, "school": p_data["TEAM"], "pos": saved_pos,
+        "cls": p_data["CLASS"], "height": p_data["HEIGHT"], "tier": saved_tier,
+        "projection": "", "role": saved_role, "tags": [],
+    }
+    components.html(
+        render_tile_card_html(card_player, df_all, card_benchmarks, show_writeup=False),
+        height=900, scrolling=True,
+    )
 
-    st.write("**Player Metrics Line**")
+    st.write("**Competition Split**")
 
     _split = st.radio(
         "Competition split",
@@ -2155,13 +2089,9 @@ with tab_card:
     _max_rank = None if _split == "All Games" else (100 if _split == "Top 100" else 50)
 
     if not _gl_ready:
-        st.info("Run `python3 build_game_logs.py` to enable split stats.")
+        st.info("Run `python3 build_game_logs.py` to enable the shot chart.")
     else:
         _box_df = load_consistent_boxscore_stats(_max_rank)
-        _p5_bench = load_p5_percentile_benchmarks(df_all, _max_rank)
-        _pos_group = get_player_position_group(current_player)
-
-        # Find this player in box-score stats — match by team name to resolve duplicate names
         _pbox = _box_df[_box_df["PLAYER"] == current_player]
         if len(_pbox) > 1:
             _bt_team = p_data["TEAM"]
@@ -2169,72 +2099,8 @@ with tab_card:
             if not _team_match.empty:
                 _pbox = _team_match
 
-        if _pbox.empty:
-            st.info(f"No box-score data found for {current_player} in {_split} games.")
-        else:
-            r = _pbox.iloc[0]
-            gp = int(r["GP"])
-            bench = _p5_bench.get(_pos_group, {})
-
-            def _card(label, stat_key, val=None, higher_is_better=True):
-                try:
-                    v = float(r[stat_key]) if val is None else float(val)
-                except (TypeError, ValueError, KeyError):
-                    v = 0.0
-                if math.isnan(v):
-                    v = 0.0
-                sv = sorted(bench.get(stat_key, []))
-                pct = get_pct(v, sv)
-                if pct is not None and not higher_is_better:
-                    pct = 100 - pct
-                return (label, fmt(v), pct)
-
-            sos_rank, _ = get_player_sos(current_player, r["TEAM"])
-            sos_label = f"Avg Rank {sos_rank}" if sos_rank else "—"
-
-            _bench_label = f"P5 {_pos_group}s · {_split}"
-            st.caption(
-                f"**{gp} games** vs {_split} opponents · position group: **{_pos_group}** "
-                f"· colors = percentile vs {_bench_label}"
-            )
-
-            _has_kp = "ORTG_KP" in r.index and not (r["ORTG_KP"] is None or (isinstance(r["ORTG_KP"], float) and math.isnan(r["ORTG_KP"])))
-
-            cards = [
-                ("Avg Opp Rank (SOS)", sos_label, None),
-                _card("PPG",     "PPG"),
-                _card("TS%",     "TS"),
-                _card("USG%",    "USG"),
-                _card("AST%",    "AST_PCT"),
-                _card("OREB%",   "OR_PCT"),
-                _card("DREB%",   "DR_PCT"),
-                _card("BLK%",    "BLK_PCT"),
-                _card("STL%",    "STL_PCT"),
-                _card("FT Rate", "FTR"),
-                _card("2P%",     "TWO_P"),
-                _card("3P%",     "THREE_P"),
-                _card("FT%",     "FT_PCT"),
-            ]
-            if _has_kp:
-                cards += [
-                    _card("KP ORtg",   "ORTG_KP"),
-                    _card("KP Usage%", "USAGE_KP"),
-                ]
-            render_pct_stat_cards(cards, per_row=4)
-
-            if _split == "All Games":
-                bt_row = df_all[df_all["PLAYER"] == current_player]
-                if not bt_row.empty:
-                    d = bt_row.iloc[0]
-                    st.caption("**Model Metrics (BartTorvik · All Games only · not split-adjustable)**")
-                    st.markdown(
-                        f"OBPM **{fmt(d['OBPM'])}** · DBPM **{fmt(d['DBPM'])}** · "
-                        f"BPM **{fmt(d['BPM'])}** · PRPG **{fmt(d['PRPG'])}** · "
-                        f"MPG **{fmt(d['MPG'])}**"
-                    )
-
         # Shot chart section — use matched team_espn_id to avoid name collisions
-        _team_id = r["team_espn_id"] if not _pbox.empty and "team_espn_id" in r.index else None
+        _team_id = _pbox.iloc[0]["team_espn_id"] if not _pbox.empty and "team_espn_id" in _pbox.columns else None
         _shots = load_player_shots(current_player, _team_id, _max_rank)
         if not _shots.empty:
             st.write("**Shot Chart**")
@@ -2246,19 +2112,6 @@ with tab_card:
             plt.close(_fig)
 
     st.divider()
-
-    st.write("**Advanced Card — BartTorvik tiles (front) · Synergy shot/play type (back, via flip button)**")
-    card_benchmarks = build_national_benchmarks(df_all)
-    curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
-    card_player = curated_player or {
-        "name": current_player, "school": p_data["TEAM"], "pos": saved_pos,
-        "cls": p_data["CLASS"], "height": p_data["HEIGHT"], "tier": saved_tier,
-        "projection": "", "role": saved_role, "tags": [],
-    }
-    components.html(
-        render_tile_card_html(card_player, df_all, card_benchmarks, show_writeup=False),
-        height=760, scrolling=True,
-    )
 
     with st.expander(f"Find Comps: {current_player}", expanded=False):
         if curated_player:
@@ -2288,7 +2141,23 @@ with tab_card:
             boost_note = f" boosted toward this player's real-stat strength: **{dominant_cat}**" if dominant_cat else ""
             st.write(f"**Top {len(top_matches)} comps from {len(df_all):,} current-season players** "
                      f"— height ±5in, weighted by **{comp_bucket}** profile{boost_note}, "
-                     f"conference tier nudges the ranking.")
+                     f"conference tier nudges the ranking, shot-selection profile and zone FG% "
+                     f"(rim/mid/three) also weighted in where shot-chart data exists.")
+
+            def _zone_fmt(freq, eff):
+                eff_txt = f"{eff:.0f}% FG" if pd.notna(eff) else "no FG% sample"
+                return f"{freq:.0f}% ({eff_txt})"
+
+            _zone_df = merge_shot_zones(df_all)
+            _target_zone_row = _zone_df[_zone_df["PLAYER"] == current_player]
+            if not _target_zone_row.empty and pd.notna(_target_zone_row.iloc[0].get("PCT_RIM")):
+                tz = _target_zone_row.iloc[0]
+                st.caption(
+                    f"**{current_player}'s shot profile (share of FGA, zone FG%):** "
+                    f"Rim {_zone_fmt(tz['PCT_RIM'], tz['RIM_FG_PCT'])} · "
+                    f"Mid {_zone_fmt(tz['PCT_MID'], tz['MID_FG_PCT'])} · "
+                    f"Three {_zone_fmt(tz['PCT_THREE'], tz['THREE_FG_PCT'])}"
+                )
 
             if not top_matches:
                 st.info("No close height/stat matches found in the current season database.")
@@ -2305,6 +2174,26 @@ with tab_card:
                     c_ts   = float(match_data.get("TS", 0))
                     c_ts   = c_ts * 100 if c_ts <= 1.0 else c_ts
                     c_ast  = float(match_data.get("AST", 0))
+
+                    def _zone_tile(freq, eff, label):
+                        eff_txt = f"{eff:.0f}% FG" if pd.notna(eff) else "—"
+                        return (
+                            "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
+                            "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{freq:.0f}%" + "</div>"
+                            "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">" + label + "</div>"
+                            "<div style=\"font-size:7px;color:#9ca3af;\">" + eff_txt + "</div>"
+                            "</div>"
+                        )
+
+                    zone_row_html = ""
+                    if pd.notna(match_data.get("PCT_RIM")):
+                        zone_row_html = (
+                            "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                            + _zone_tile(match_data["PCT_RIM"], match_data.get("RIM_FG_PCT"), "Rim FGA")
+                            + _zone_tile(match_data["PCT_MID"], match_data.get("MID_FG_PCT"), "Mid FGA")
+                            + _zone_tile(match_data["PCT_THREE"], match_data.get("THREE_FG_PCT"), "Three FGA").replace("border-right:1px solid #e5e7eb;", "")
+                            + "</div>"
+                        )
 
                     html = (
                         "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
@@ -2337,6 +2226,7 @@ with tab_card:
                         "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div>"
                         "</div>"
                         "</div>"
+                        + zone_row_html +
                         "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
                         "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
                         "</div>"
@@ -2356,6 +2246,15 @@ with tab_card:
         position_input = st.selectbox("Primary Position Grouping:", position_list, index=pos_idx)
     with col_role:
         role_input = st.text_input("Projected Tactical Role Allocation (e.g., Starting Point Guard):", value=saved_role)
+
+    st.write("**🎯 Front Office Target Board**")
+    col_tier, col_valtag = st.columns(2)
+    with col_tier:
+        tier_input = st.selectbox("Priority", TIER_OPTIONS,
+                                  index=TIER_OPTIONS.index(saved_tier) if saved_tier in TIER_OPTIONS else 1)
+    with col_valtag:
+        value_tag_input = st.selectbox("Value Tag", VALUE_TAG_OPTIONS,
+                                       index=VALUE_TAG_OPTIONS.index(saved_value_tag) if saved_value_tag in VALUE_TAG_OPTIONS else 1)
 
     st.write("**Representation & Personnel Valuation**")
     col_agent, col_agency, col_nil, col_val = st.columns(4)
@@ -2389,9 +2288,9 @@ with tab_card:
                            photo_url=excluded.photo_url, eval_date=excluded.eval_date, notes=excluded.notes,
                            value_tag=excluded.value_tag
                        ''',
-                       (current_player, p_data["TEAM"], scout_input, board_tier, position_input, role_input,
+                       (current_player, p_data["TEAM"], scout_input, tier_input, position_input, role_input,
                         nil_input, val_input, agent_input, agency_input, final_photo, execution_date,
-                        notes_input, board_value_tag))
+                        notes_input, value_tag_input))
         conn.commit()
         conn.close()
         st.success(f"Scouting report saved for {current_player}.")
@@ -2728,20 +2627,30 @@ with tab2:
 
     st.write(f"**Filter Results ({st.session_state.discovery_split}):** Found {len(filtered_df)} profiles matching criteria.")
 
+    # A widget callback only fires when *this* widget's own selection genuinely
+    # changes from a user click on it — unlike checking event_discovery.selection.rows
+    # in the main body, which re-reads the same still-selected row on every rerun
+    # (including ones triggered by unrelated widgets, like picking a new player in the
+    # Player Card dropdown) and would keep forcing active_player back to this row.
+    def _on_portal_row_click():
+        sel = st.session_state.get("discovery_df_select", {})
+        rows = sel.get("selection", {}).get("rows", [])
+        if rows:
+            st.session_state.active_player = filtered_df.iloc[rows[0]]["PLAYER"]
+            st.session_state.go_to_profile = True
+
     event_discovery = st.dataframe(
         filtered_df,
         hide_index=True,
-        on_select="rerun",
+        on_select=_on_portal_row_click,
         selection_mode="single-row",
-        height=650
+        height=650,
+        key="discovery_df_select",
     )
 
     if event_discovery.selection.rows:
         clicked_idx = event_discovery.selection.rows[0]
         clicked_player = filtered_df.iloc[clicked_idx]["PLAYER"]
-        if st.session_state.active_player != clicked_player:
-            st.session_state.active_player = clicked_player
-            st.rerun()
         st.caption(f"🎯 **{clicked_player}** selected — their full card is loaded on the "
                    f"**Player Card** and **One Pager** tabs.")
 
@@ -2903,3 +2812,4 @@ with tab4:
                             "</div>",
                             unsafe_allow_html=True
                         )
+
