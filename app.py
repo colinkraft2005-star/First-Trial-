@@ -437,8 +437,8 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
                     NULLIF(SUM(t.opp_fga)-SUM(t.opp_fg3a), 0), 1)               AS BLK_PCT,
                 ROUND(SUM(CASE WHEN t.possessions IS NOT NULL THEN p.stl END)*100.0 /
                     NULLIF(SUM(t.possessions), 0), 1)                            AS STL_PCT,
-                ROUND(AVG(CASE WHEN p.ortg_kp IS NOT NULL THEN p.ortg_kp END), 1) AS ORTG_KP,
-                ROUND(AVG(CASE WHEN p.usage_kp IS NOT NULL THEN p.usage_kp END), 1) AS USAGE_KP
+                NULL AS ORTG_KP,
+                NULL AS USAGE_KP
             FROM player_game_logs p
             LEFT JOIN game_team_stats t
                 ON t.team_espn_id = p.team_espn_id AND t.game_date = p.game_date
@@ -1364,14 +1364,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab5 = st.tabs([
+tab_card, tab_depth, tab_onepager, tab2, tab3, tab4 = st.tabs([
     "Player Card",
     "Depth Chart",
     "One Pager",
     "Portal Discovery Engine",
     "Front Office Target Board",
-    "Big Board Print View",
-    "Player Card / Ranking System",
+    "Big Board Print View"
 ])
 
 import streamlit.components.v1 as components
@@ -1395,7 +1394,7 @@ components.html(f"""
 
     function tryRestore() {{
         var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-        if (tabs.length >= 7) {{
+        if (tabs.length >= 6) {{
             attachListeners(tabs);
             if (goToProfile || savedTab > 0) {{
                 tabs[savedTab].click();
@@ -2742,7 +2741,6 @@ with tab2:
         clicked_player = filtered_df.iloc[clicked_idx]["PLAYER"]
         if st.session_state.active_player != clicked_player:
             st.session_state.active_player = clicked_player
-            st.session_state.go_to_profile = True
             st.rerun()
         st.caption(f"🎯 **{clicked_player}** selected — their full card is loaded on the "
                    f"**Player Card** and **One Pager** tabs.")
@@ -2905,347 +2903,3 @@ with tab4:
                             "</div>",
                             unsafe_allow_html=True
                         )
-
-# ==========================================
-# TAB 5: PLAYER CARD / RANKING SYSTEM
-# ==========================================
-
-PORTAL_PLAYERS = [
-    {"name":"Dillian Shaw","school":"Saint Mary's","pos":"G/Wing","cls":"Fr","height":"6'7\"","tier":"Tier 3","shooting":76,"playmaking":68,"defense":88,"rebounding":64,"tags":["Versatile Defender","3.2 DBPM","Real Shooter","Winning Player"],"projection":"High-major role wing","role":"Two-Way Role Wing","ts":"58.6","usg":"17.0","p3":"42.0","writeup":"High-level role wing who understands team basketball. Strong defender (3.2 DBPM), long, switchable, moves his feet well. Offensively efficient and disciplined. 59% TS, 42% from three on real volume. Projects as a high-major role wing who defends multiple spots, shoots it, and plays within structure."},
-    {"name":"Allen Graves","school":"Santa Clara","pos":"PF","cls":"Fr","height":"6'9\"","tier":"Tier 3","shooting":82,"playmaking":62,"defense":68,"rebounding":72,"tags":["Efficient Stretch 4","Screening IQ","Low-Mistake"],"projection":"High-major starting 4","role":"Stretch 4 / Screener","ts":"63.0","usg":"22.0","p3":"40.0","writeup":"Efficient, low-mistake stretch 4 with real feel. 22% usage on 130 ORTG, 40% from 3, almost no turnovers. Generates value through screening, short-roll reads, offensive rebounding, and smart shot selection."},
-    {"name":"Rolyns Aligbe","school":"Southern Illinois","pos":"PF","cls":"So","height":"6'9\"","tier":"Tier 3","shooting":68,"playmaking":52,"defense":70,"rebounding":84,"tags":["23% DRB","Lob Threat","High Energy","Capable Shooter"],"projection":"High-major depth big","role":"Athletic Big / Lob Threat","ts":"56.0","usg":"19.0","p3":"42.9","writeup":"Athletic, high-energy forward who generates value through rebounding and activity. Elite defensive rebounder (23% DRB). Solid quick bounce, real lob threat, runs well. Capable shooter (21/49 from three)."},
-    {"name":"Tyler Thompson","school":"Montana","pos":"Wing","cls":"RS Fr","height":"6'6\"","tier":"Tier 3","shooting":90,"playmaking":44,"defense":56,"rebounding":52,"tags":["Lethal Shooter","Movement Shooter","Role Clarity","Ball Fake Shooter"],"projection":"High-major role shooter","role":"Movement Shooter","ts":"62.0","usg":"13.0","p3":"42.0","writeup":"Lethal movement shooter. 42% from three on 130+ attempts, taking 5.5 threes per game while barely touching the paint. Ball fake, side-step, quick release. Projects as a high-major role wing."},
-    {"name":"Andrija Bukumirovic","school":"UT Martin","pos":"Wing/F","cls":"Jr","height":"6'6\"","tier":"Tier 3","shooting":72,"playmaking":60,"defense":72,"rebounding":70,"tags":["Swiss Army Knife","High Motor","Spot-Up Shooter","Two-Way"],"projection":"High mid-major starter","role":"Swiss Army Knife Wing","ts":"60.0","usg":"19.0","p3":"38.0","writeup":"Versatile stretch forward who impacts the game without needing the ball. Always ready to shoot off the catch. Rebounds at a high level, brings real defensive value. True swiss-army knife forward."},
-    {"name":"Oswin Erhunmwunse","school":"Providence","pos":"PF/C","cls":"So","height":"6'10\"","tier":"Tier 4","shooting":30,"playmaking":42,"defense":72,"rebounding":84,"tags":["Elite Wedger","Drop Defender","10% Block Rate","Rim Finisher"],"projection":"High-major scheme fit big","role":"Drop Center / Rim Presence","ts":"68.0","usg":"18.0","p3":"0","writeup":"Massive interior presence. 10% block rate, 72% on close 2s. Elite wedge on the offensive glass. Strong drop-coverage defender. Projects as a starting center at a strong mid-major or lower-tier power conference school."},
-    {"name":"Daniel Freitag","school":"Buffalo","pos":"G/CG","cls":"So","height":"6'2\"","tier":"Tier 3","shooting":76,"playmaking":66,"defense":52,"rebounding":58,"tags":["20 PPG","High Volume Shooter","Pick and Roll Creator","39% from 3"],"projection":"High-major bench scorer","role":"High-Usage Scoring Guard","ts":"60.0","usg":"28.0","p3":"39.0","writeup":"High-usage scoring guard who carries Buffalo's offense. 20 PPG, 11 threes per 100 possessions at 39 percent. Real-volume shooter with the ultimate green light. Could be an efficient three-level secondary option backup guard at a high major."},
-    {"name":"London Jemison","school":"Alabama","pos":"Wing/F","cls":"Fr","height":"6'8\"","tier":"Tier 3","shooting":76,"playmaking":48,"defense":64,"rebounding":66,"tags":["Floor Spacer","Off-Ball Mover","35.7% from 3","Low Usage High Efficiency"],"projection":"High-major role wing","role":"Off-Ball Spacing Wing","ts":"56.5","usg":"17.7","p3":"35.7","writeup":"Low-usage, high-efficiency wing whose value comes from spacing, movement, and playing within structure. 17.7% usage with 117.0 ORTG. Quick release, confident mechanics. Defensively functional and switchable."},
-    {"name":"Treyson Anderson","school":"North Dakota State","pos":"F/C","cls":"So","height":"6'9\"","tier":"Tier 3","shooting":74,"playmaking":50,"defense":62,"rebounding":68,"tags":["Pure Jumper","Pick and Pop","38.4% from 3","Efficient Inside Arc"],"projection":"High-major backup 4/5","role":"Pick & Pop Big","ts":"58.0","usg":"18.0","p3":"38.4","writeup":"The jumper is pure. Clean mechanics, confident release, shoots at real volume (33-86 from three at 38.4%). Understands his role: spaces properly, lifts behind drives, ready to fire on the catch."},
-    {"name":"Lewis Walker","school":"NC A&T","pos":"Wing/G","cls":"Fr","height":"6'6\"","tier":"Tier 3","shooting":70,"playmaking":55,"defense":58,"rebounding":58,"tags":["Physical Two Guard","Foul Drawer","37% from 3","Downhill Scorer"],"projection":"High-major secondary scorer","role":"Physical Downhill Wing","ts":"60.0","usg":"23.0","p3":"37.0","writeup":"Strong, physical 6'6 freshman wing who projects as a secondary downhill option at the high-major level. Legit two-guard frame, efficient and versatile. Foul drawing is real, converts at 87% from the line."},
-    {"name":"Rob Dockery","school":"La Salle","pos":"Wing/W","cls":"So","height":"6'6\"","tier":"Tier 3","shooting":58,"playmaking":56,"defense":68,"rebounding":68,"tags":["High-Major Body","Foul Drawer","Transition Threat","Do-It-All Wing"],"projection":"High-major rotation wing","role":"Do-It-All Role Wing","ts":"58.0","usg":"20.0","p3":"32.0","writeup":"High-major role wing who can scale up immediately. Big, strong, physical body. Really effective in transition and around the rim. Low mistake player. Not flashy, but coaches trust him immediately."},
-    {"name":"Adam Olsen","school":"South Alabama","pos":"F","cls":"Jr","height":"6'8\"","tier":"Tier 3","shooting":82,"playmaking":44,"defense":52,"rebounding":58,"tags":["Dynamic Shooter","Movement Catch-and-Shoot","DHO Weapon","One-Dribble Pull Up"],"projection":"High mid-major shooter","role":"Movement Shooter / DHO Weapon","ts":"62.0","usg":"20.0","p3":"41.0","writeup":"Dynamic shooting 4 who thrives almost entirely off movement and spacing actions. Elite catch-and-shoot guy. Not a creator. Clear role player who can really shoot it but is dependent on a system that uses handoffs and movement."},
-    {"name":"Ishan Sharma","school":"Saint Louis","pos":"Wing/G","cls":"So","height":"6'5\"","tier":"Tier 3","shooting":76,"playmaking":60,"defense":72,"rebounding":56,"tags":["44% from 3","Switchable Defender","Role-Driven","Two-Way"],"projection":"High-major rotation wing","role":"Two-Way Connective Wing","ts":"62.0","usg":"17.0","p3":"44.0","writeup":"Role-driven, two-way guard who understands how to impact winning without needing the ball. Defensively solid and versatile. Offensively low usage, efficient production, and real shooting touch: around 44% from three."},
-    {"name":"Tomislav Buljan","school":"New Mexico","pos":"C/PF","cls":"Fr","height":"6'9\"","tier":"Tier 3","shooting":38,"playmaking":44,"defense":62,"rebounding":76,"tags":["Massive Frame","Elite Rim Finisher","Physical Screener","17.7% ORB"],"projection":"High-major role big","role":"Screening Rebounding Big","ts":"60.0","usg":"25.7","p3":"23.5","writeup":"6'9 freshman big with a massive frame and true interior presence. High-usage but projects best as a screening, rebounding, physical interior big who can punish switches."},
-    {"name":"Torey Alston","school":"Middle Tennessee","pos":"F/C","cls":"Jr","height":"6'8\"","tier":"Tier 3","shooting":38,"playmaking":44,"defense":68,"rebounding":78,"tags":["High Motor","Lob Threat","87.5% on Dunks","Foul Drawer"],"projection":"High-major rotation big","role":"High-Motor Lob Threat","ts":"60.0","usg":"20.0","p3":"15.4","writeup":"High-motor frontcourt piece who generates value through screening, rim pressure, and activity. Sets real, physical screens and creates separation. Legit lob threat and interior finisher. Strong rebounder."},
-    {"name":"Terrence Hill Jr.","school":"VCU","pos":"G","cls":"So","height":"6'3\"","tier":"Tier 3","shooting":78,"playmaking":62,"defense":64,"rebounding":52,"tags":["Three-Level Scorer","Screen Navigator","131.9 ORTG","Pull-Up Touch"],"projection":"High-major scoring guard","role":"Three-Level Scoring Guard","ts":"63.1","usg":"23.9","p3":"38.0","writeup":"Natural scorer who is always looking to shoot first. Uses screens really well. 57.3 eFG and 63.1 TS on 23.9% usage. Confident bucket-getter who can hurt you at all three levels."},
-    {"name":"Robert Miller III","school":"LSU","pos":"C","cls":"So","height":"6'10\"","tier":"Tier 3","shooting":40,"playmaking":44,"defense":72,"rebounding":68,"tags":["Freak Athlete","Pick and Roll Finisher","Lob Threat","Step-Up Screen Feel"],"projection":"High-major rim runner","role":"Rim-Running Lob Threat","ts":"58.0","usg":"14.0","p3":"0","writeup":"6'10 freak athlete with obvious tools. Runs well, plays fast. Offensively a pick-and-roll and lob guy. Defensively projects as an athletic 5 who can guard and protect the rim. Fast off the floor with real shot-blocking upside."},
-    {"name":"Bishop Boswell","school":"Tennessee","pos":"G/CG","cls":"So","height":"6'4\"","tier":"Tier 3","shooting":74,"playmaking":64,"defense":70,"rebounding":62,"tags":["Three-Level Scorer","86% FT","62% FTR","64.4 TS"],"projection":"High-major guard","role":"Three-Level Scoring Guard","ts":"64.4","usg":"23.0","p3":"37.0","writeup":"23% usage, 124.8 ORTG, 64.4 TS. Efficient three-level scorer who gets to the line and hits 86%. Finishes well at the rim and shoots 37% from three. Strong frame, physical downhill guard, smart and tough."},
-    {"name":"KJ Lewis","school":"Georgetown","pos":"CG","cls":"Jr","height":"6'4\"","tier":"Tier 3","shooting":52,"playmaking":62,"defense":64,"rebounding":64,"tags":["Strong Frame","Transition Threat","Secondary Playmaker","3rd Team All Big East"],"projection":"High-major rotation guard","role":"Physical Downhill Guard","ts":"54.0","usg":"22.0","p3":"28.0","writeup":"Physically strong, downhill guard who rebounds well for his position and brings real value in transition. Non-shooter. Fits as a high-major 2 guard and secondary scoring option. 3rd team All Big East."},
-    {"name":"Noah Feddersen","school":"North Dakota State","pos":"PF/C","cls":"Jr","height":"6'10\"","tier":"Tier 3","shooting":52,"playmaking":46,"defense":62,"rebounding":70,"tags":["Soft Hands","Efficient Interior","Low-Mistake Big","Surprisingly Athletic"],"projection":"High-major backup 5","role":"Low-Mistake Interior Big","ts":"58.0","usg":"16.0","p3":"0","writeup":"Really solid functional big who can scale up because of how clean and controlled his game is. Efficient around the rim with good touch, soft hands, and better-than-expected athleticism for his size."},
-    {"name":"Carey Booth","school":"Colorado State","pos":"F","cls":"Jr","height":"6'10\"","tier":"Tier 4","shooting":62,"playmaking":42,"defense":68,"rebounding":72,"tags":["Athletic Complementary Big","Defensive Rebounder","Lob Threat"],"projection":"Mid-major starter","role":"Athletic Complementary Big","ts":"58.0","usg":"16.0","p3":"33.0","writeup":"Strong defensive rebounder with solid block rate. Efficient around the rim. Best when cutting, in the dunker spot, or finishing lobs. Projects as a starter at a strong mid-major or 8th-9th man on a good Power 5 team."},
-    {"name":"Isaiah Malone","school":"Florida Gulf Coast","pos":"Wing/F","cls":"Jr","height":"6'8\"","tier":"Tier 4","shooting":58,"playmaking":50,"defense":64,"rebounding":66,"tags":["Super Bouncy","Natural Weak-Side Blocker","Aggressive Downhill","Jumper Upside"],"projection":"High-major rotational big","role":"Athletic Wing / Weak-Side Blocker","ts":"58.0","usg":"19.0","p3":"52.9","writeup":"Long, athletic, explosive forward. Super bouncy and clearly more athletic than most. Natural weak-side shot blocker. Quick off two feet and plays above the rim easily. Could be a rotational big at a high major off of pure athleticism."},
-    {"name":"Ben Hammond","school":"Virginia Tech","pos":"PG/CG","cls":"So","height":"5'11\"","tier":"Tier 4","shooting":74,"playmaking":72,"defense":70,"rebounding":50,"tags":["Low Turnover","Active Hands","High IQ","Real Shooter"],"projection":"High-major role guard","role":"Low-Mistake Floor-Spacing Guard","ts":"60.0","usg":"16.0","p3":"38.0","writeup":"Low-mistake, high-IQ combo guard whose value starts with shooting and decision-making. Does not turn the ball over. Legit three-point weapon on catch-and-shoot. Defensively plays with edge, averages around two steals per game."},
-    {"name":"Jack Karasinski","school":"Bellarmine","pos":"Wing/F","cls":"So","height":"6'7\"","tier":"Tier 4","shooting":80,"playmaking":44,"defense":56,"rebounding":60,"tags":["44.9% FG","77.4% on Cuts","Elite Spot-Up","Non-Creator"],"projection":"High-major depth stretch 4","role":"Spot-Up Shooter / Cutter","ts":"65.0","usg":"16.0","p3":"39.0","writeup":"Elite efficiency wing who thrives without the ball. 44.9% FG, 77.4% on cuts. 129.5 ORTG, 65% TS. Un-athletic stretch 4 who could play 18-25 minutes and be effective."},
-    {"name":"Blake Barklay","school":"East Tennessee State","pos":"Wing/F","cls":"So","height":"6'8\"","tier":"Tier 3","shooting":68,"playmaking":52,"defense":62,"rebounding":62,"tags":["Efficient Role Wing","36% from 3","Post Mismatch","Low Foul Rate"],"projection":"High-major rotation piece","role":"Versatile Role Wing","ts":"60.0","usg":"18.0","p3":"36.0","writeup":"Projects better than a lot of mid-major forwards. Efficient, plays under control. 36% from three on about 40 attempts. Can put it on the deck and attack on hard closeouts. Can absolutely be an effective high-major rotation piece."},
-    {"name":"Gavin Doty","school":"Siena","pos":"G","cls":"So","height":"6'5\"","tier":"Tier 4","shooting":72,"playmaking":68,"defense":58,"rebounding":68,"tags":["Controlled Iso Scorer","Midrange Bag","Low Turnover","Strong Rebounder for Guard"],"projection":"High mid-major scorer","role":"Iso Mid-Range Scorer","ts":"57.0","usg":"22.6","p3":"28.0","writeup":"Plays 90% of minutes and scores efficiently on solid usage while taking great care of the ball. Controlled, iso-heavy scorer who operates from the top of the key and lives in the midrange."},
-    {"name":"Sonny Wilson","school":"Toledo","pos":"CG","cls":"Jr","height":"6'1\"","tier":"Tier 4","shooting":76,"playmaking":68,"defense":52,"rebounding":50,"tags":["41% from 3","Snake Screen Specialist","Low Turnover","Crafty Scorer"],"projection":"High-major starter","role":"Ball Screen Scoring Guard","ts":"60.0","usg":"23.0","p3":"41.0","writeup":"Skilled offensive guard with real value as a shot-maker and low-turnover ball handler. 17 PPG with 23% usage, shot 41% from three on about 100 attempts. Really good in the midrange coming off ball screens."},
-    {"name":"Chol Machot","school":"Charleston","pos":"F/C","cls":"RS So","height":"7'0\"","tier":"Tier 4","shooting":42,"playmaking":38,"defense":72,"rebounding":82,"tags":["Elite Length","High Motor","Rim Protector","Transition Runner"],"projection":"High-major role big","role":"Rim Protector / Energy Big","ts":"56.0","usg":"16.0","p3":"0","writeup":"Long, high-motor rim protector who generates value through rebounding and shot blocking. Elite length, blocks shots outside his area. Runs the floor extremely well for his size. Projects as a high-major role big."},
-]
-
-
-def parse_height_inches(ht_str):
-    """Convert height string like 6'7" or 6-7 to total inches. Clean and reliable."""
-    try:
-        s = str(ht_str).replace('"', '').strip()
-        if "\'" in s:
-            parts = s.split("\'")
-            return int(parts[0].strip()) * 12 + (int(parts[1].strip()) if parts[1].strip().isdigit() else 0)
-        if "-" in s:
-            parts = s.split("-")
-            return int(parts[0].strip()) * 12 + int(parts[1].strip())
-        val = int(s)
-        return val if val > 12 else val * 12
-    except:
-        return 78
-
-
-def get_bar_color(score):
-    if score >= 80:
-        return "#2774AE"
-    if score >= 65:
-        return "#F0B429"
-    return "#DC2626"
-
-
-def render_card_html(player, show_writeup=False):
-    sh_c = get_bar_color(player["shooting"])
-    df_c = get_bar_color(player["defense"])
-    pl_c = get_bar_color(player["playmaking"])
-    rb_c = get_bar_color(player["rebounding"])
-
-    tags_html = "".join([
-        "<span style=\"background:#e8f1f9;color:#2774AE;font-family:'DM Mono',monospace;font-size:8px;font-weight:600;padding:3px 9px;border-radius:3px;border:1px solid #b8d3ec;margin:2px;display:inline-block;text-transform:uppercase;letter-spacing:.04em;\">" + t + "</span>"
-        for t in player.get("tags", [])
-    ])
-
-    writeup_html = ""
-    if show_writeup and player.get("writeup"):
-        writeup_html = "<div style=\"padding:10px 14px;border-top:1px solid #e5e7eb;font-size:12px;line-height:1.65;color:#374151;\">" + player["writeup"] + "</div>"
-
-    ts  = str(player.get("ts", ""))
-    usg = str(player.get("usg", ""))
-    p3  = str(player.get("p3", "0"))
-
-    stats_html = ""
-    if ts:
-        stats_html = (
-            "<div style=\"display:flex;border-bottom:1px solid #e5e7eb;background:#fff;\">"
-            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-            "<span style=\"font-size:13px;font-weight:500;color:#111827;display:block;\">" + ts + "%</span>"
-            "<span style=\"font-size:7px;color:#6b7280;text-transform:uppercase;display:block;margin-top:2px;\">TS%</span>"
-            "</div>"
-            "<div style=\"flex:1;padding:9px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-            "<span style=\"font-size:13px;font-weight:500;color:#111827;display:block;\">" + usg + "%</span>"
-            "<span style=\"font-size:7px;color:#6b7280;text-transform:uppercase;display:block;margin-top:2px;\">USG%</span>"
-            "</div>"
-            "<div style=\"flex:1;padding:9px 0;text-align:center;\">"
-            "<span style=\"font-size:13px;font-weight:500;color:#111827;display:block;\">" + p3 + "%</span>"
-            "<span style=\"font-size:7px;color:#6b7280;text-transform:uppercase;display:block;margin-top:2px;\">3P%</span>"
-            "</div>"
-            "</div>"
-        )
-
-    def bar(label, val, color):
-        return (
-            "<div style=\"margin-bottom:6px;\">"
-            "<div style=\"display:flex;justify-content:space-between;font-size:9px;text-transform:uppercase;color:#374151;margin-bottom:2px;\">"
-            "<span>" + label + "</span>"
-            "<span style=\"color:" + color + ";font-weight:600;\">" + str(val) + "</span>"
-            "</div>"
-            "<div style=\"background:#e5e7eb;border-radius:2px;height:5px;overflow:hidden;\">"
-            "<div style=\"height:100%;width:" + str(val) + "%;background:" + color + ";border-radius:2px;\"></div>"
-            "</div>"
-            "</div>"
-        )
-
-    name       = player.get("name", "")
-    height     = player.get("height", "")
-    pos        = player.get("pos", "")
-    cls        = player.get("cls", "")
-    school     = player.get("school", "")
-    tier       = player.get("tier", "")
-    projection = player.get("projection", "")
-    role       = player.get("role", "")
-
-    return (
-        "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:14px;\">"
-        "<div style=\"padding:14px 16px 10px;border-bottom:1px solid #e5e7eb;\">"
-        "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;\">"
-        "<div>"
-        "<div style=\"font-size:20px;font-weight:800;color:#111827;letter-spacing:.02em;\">" + name + "</div>"
-        "<div style=\"font-size:10px;color:#6b7280;margin-top:3px;\">" + height + " &middot; " + pos + " &middot; " + cls + " &middot; " + school + "</div>"
-        "</div>"
-        "<span style=\"font-size:9px;padding:3px 9px;border-radius:3px;background:#fff7e0;border:1px solid #f9d98a;color:#92600a;font-weight:600;\">" + tier + "</span>"
-        "</div>"
-        "</div>"
-        + stats_html +
-        "<div style=\"padding:12px 16px 6px;\">"
-        + bar("Shooting", player["shooting"], sh_c)
-        + bar("Defense", player["defense"], df_c)
-        + bar("Playmaking", player["playmaking"], pl_c)
-        + bar("Rebounding", player["rebounding"], rb_c) +
-        "</div>"
-        "<div style=\"padding:0 16px 10px;\">" + tags_html + "</div>"
-        "<div style=\"padding:10px 16px;border-top:1px solid #e5e7eb;background:#f9fafb;\">"
-        "<div style=\"font-size:12px;font-weight:700;color:#111827;\">" + projection + "</div>"
-        "<div style=\"font-size:9px;color:#2774AE;margin-top:2px;\">" + role + "</div>"
-        "</div>"
-        + writeup_html +
-        "</div>"
-    )
-
-
-def score_comp(player, hist_row):
-    """
-    Torvik-style fingerprint scoring using df_all rows.
-    df_all has clean HEIGHT strings already parsed by Trey's app.
-    Hard filters: height +/-3in, then full stat fingerprint with dominant skill boost.
-    """
-    try:
-        p_h = parse_height_inches(player.get("height", "6'6\""))
-        h_h = parse_height_inches(str(hist_row.get("HEIGHT", "6'6\"")))
-        if abs(p_h - h_h) > 5:
-            return 0.0
-
-        def nd(a, b, r):
-            try:
-                return max(0.0, 1.0 - abs(float(a) - float(b)) / r)
-            except:
-                return 0.0
-
-        # Core stat comparisons against df_all columns
-        p_ts  = float(player.get("ts", 58) or 58)
-        p_usg = float(player.get("usg", 18) or 18)
-        p_p3  = float(player.get("p3", 0) or 0)
-
-        h_ts  = float(hist_row.get("TS", 55))
-        h_ts  = h_ts * 100 if h_ts <= 1.0 else h_ts
-        h_usg = float(hist_row.get("USG", 18))
-        h_bpm = float(hist_row.get("BPM", 0))
-        h_dbpm = float(hist_row.get("DBPM", 0))
-        h_efg  = float(hist_row.get("EFG", 50))
-        h_ast  = float(hist_row.get("AST", 15))
-        h_orb  = float(hist_row.get("OR", 5))
-        h_drb  = float(hist_row.get("DR", 10))
-        h_blk  = float(hist_row.get("BLK", 3))
-        h_stl  = float(hist_row.get("STL", 2))
-        h_p3   = float(hist_row.get("THREE_P", 30)) if "THREE_P" in hist_row.index else p_p3
-
-        # Skill ratings from card
-        shooting   = float(player.get("shooting", 60))
-        defense    = float(player.get("defense", 60))
-        playmaking = float(player.get("playmaking", 60))
-        rebounding = float(player.get("rebounding", 60))
-
-        # Map card ratings to stat dimensions (wider ranges = less harsh)
-        p_ts_mapped  = 45 + (shooting / 100) * 25
-        p_efg_mapped = 40 + (shooting / 100) * 20
-        p_dbpm_mapped = (defense - 50) / 10
-        p_ast_mapped  = playmaking / 3.5
-        p_orb_mapped  = (rebounding / 100) * 12
-        p_drb_mapped  = (rebounding / 100) * 20
-        p_blk_mapped  = (defense / 100) * 8
-        p_stl_mapped  = (defense / 100) * 3.5
-
-        # Fingerprint scores with wider radii
-        scores = {
-            "ts":   nd(p_ts_mapped, h_ts, 12),
-            "efg":  nd(p_efg_mapped, h_efg, 12),
-            "usg":  nd(p_usg, h_usg, 10),
-            "p3":   nd(p_p3, h_p3, 15),
-            "ast":  nd(p_ast_mapped, h_ast, 10),
-            "orb":  nd(p_orb_mapped, h_orb, 6),
-            "drb":  nd(p_drb_mapped, h_drb, 8),
-            "blk":  nd(p_blk_mapped, h_blk, 5),
-            "stl":  nd(p_stl_mapped, h_stl, 3),
-            "dbpm": nd(p_dbpm_mapped, h_dbpm, 4),
-            "bpm":  nd(h_bpm, 0, 8),
-            "ht":   nd(p_h, h_h, 4),
-        }
-
-        # Base weights
-        w = {"ts":0.10,"efg":0.08,"usg":0.10,"p3":0.06,"ast":0.09,"orb":0.07,"drb":0.07,"blk":0.07,"stl":0.06,"dbpm":0.08,"bpm":0.06,"ht":0.16}
-
-        # Dominant skill boost: double the relevant weights
-        skills = {"shooting": shooting, "defense": defense, "playmaking": playmaking, "rebounding": rebounding}
-        dominant = max(skills, key=skills.get)
-        dom_val  = skills[dominant]
-
-        if dom_val >= 75:
-            if dominant == "shooting":
-                w["ts"] = 0.18; w["efg"] = 0.14; w["p3"] = 0.12
-                w["ast"] = 0.05; w["orb"] = 0.03; w["drb"] = 0.04; w["blk"] = 0.03; w["stl"] = 0.03
-                w["usg"] = 0.08; w["dbpm"] = 0.04; w["bpm"] = 0.04; w["ht"] = 0.22
-            elif dominant == "rebounding":
-                w["orb"] = 0.14; w["drb"] = 0.14; w["blk"] = 0.08
-                w["ts"] = 0.06; w["efg"] = 0.04; w["p3"] = 0.02
-                w["ast"] = 0.04; w["usg"] = 0.07; w["dbpm"] = 0.06; w["stl"] = 0.04; w["bpm"] = 0.05; w["ht"] = 0.26
-            elif dominant == "defense":
-                w["dbpm"] = 0.16; w["blk"] = 0.13; w["stl"] = 0.11
-                w["ts"] = 0.05; w["efg"] = 0.04; w["p3"] = 0.02
-                w["ast"] = 0.05; w["orb"] = 0.05; w["drb"] = 0.06; w["usg"] = 0.06; w["bpm"] = 0.05; w["ht"] = 0.22
-            elif dominant == "playmaking":
-                w["ast"] = 0.20; w["usg"] = 0.12; w["bpm"] = 0.08
-                w["ts"] = 0.07; w["efg"] = 0.05; w["p3"] = 0.04
-                w["orb"] = 0.03; w["drb"] = 0.04; w["blk"] = 0.03; w["stl"] = 0.06; w["dbpm"] = 0.06; w["ht"] = 0.22
-
-        return sum(scores[k] * w[k] for k in scores)
-    except:
-        return 0.0
-
-
-with tab5:
-    st.subheader("Player Card / Ranking System")
-    st.caption("HoopsHub Scout grade cards with live historical comp matching from BartTorvik.")
-
-    tier_options = sorted(list(set(p["tier"] for p in PORTAL_PLAYERS)))
-    tier_filter = st.multiselect("Filter by Tier:", tier_options, default=tier_options)
-    if not tier_filter:
-        tier_filter = tier_options
-
-    show_writeups = st.checkbox("Show scouting writeups", value=False)
-
-    filtered_players = [p for p in PORTAL_PLAYERS if p["tier"] in tier_filter]
-    seen = set()
-    unique_players = []
-    for p in filtered_players:
-        if p["name"] not in seen:
-            seen.add(p["name"])
-            unique_players.append(p)
-
-    st.write(f"**{len(unique_players)} players** in view")
-    st.write("---")
-
-    cols = st.columns(2)
-    for i, player in enumerate(unique_players):
-        with cols[i % 2]:
-            st.markdown(render_card_html(player, show_writeup=show_writeups), unsafe_allow_html=True)
-
-            if player.get("ts"):
-                with st.expander(f"Find Historical Comps: {player['name']}"):
-                    if df_all is None or df_all.empty:
-                        st.warning("BartTorvik data unavailable.")
-                    else:
-                        scored_comps = []
-                        for _, hist_row in df_all.iterrows():
-                            s = score_comp(player, hist_row)
-                            if s > 0.0:
-                                scored_comps.append((s, hist_row))
-
-                        scored_comps.sort(key=lambda x: x[0], reverse=True)
-                        top_matches = scored_comps[:6]
-
-                        st.write(f"**Top comps from {len(df_all):,} current-season players ({len(scored_comps)} passed height filter):**")
-
-                        if not top_matches:
-                            st.info("No close height matches found in the current season database.")
-                        else:
-                            for match_score, match_data in top_matches:
-                                pct = round(match_score * 100, 1)
-                                c_name = str(match_data.get("PLAYER", ""))
-                                c_team = str(match_data.get("TEAM", ""))
-                                c_conf = str(match_data.get("CONF", ""))
-                                c_ht   = str(match_data.get("HEIGHT", ""))
-                                c_bpm  = float(match_data.get("BPM", 0))
-                                c_usg  = float(match_data.get("USG", 0))
-                                c_efg  = float(match_data.get("EFG", 0))
-                                c_ts   = float(match_data.get("TS", 0))
-                                c_ts   = c_ts * 100 if c_ts <= 1.0 else c_ts
-                                c_ast  = float(match_data.get("AST", 0))
-
-                                html = (
-                                    "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
-                                    "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
-                                    "<div>"
-                                    "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
-                                    "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht + " &middot; " + c_team + " (" + c_conf + ")</div>"
-                                    "</div>"
-                                    "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
-                                    "</div>"
-                                    "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
-                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ts:.1f}%" + "</div>"
-                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">TS%</div>"
-                                    "</div>"
-                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_usg:.1f}%" + "</div>"
-                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">USG%</div>"
-                                    "</div>"
-                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_efg:.1f}%" + "</div>"
-                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">eFG%</div>"
-                                    "</div>"
-                                    "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_bpm:.1f}" + "</div>"
-                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">BPM</div>"
-                                    "</div>"
-                                    "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
-                                    "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ast:.1f}%" + "</div>"
-                                    "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div>"
-                                    "</div>"
-                                    "</div>"
-                                    "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
-                                    "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
-                                    "</div>"
-                                    "</div>"
-                                )
-                                st.markdown(html, unsafe_allow_html=True)
