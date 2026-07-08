@@ -801,7 +801,7 @@ tab_depth, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Portal Discovery Engine",
     "Front Office Target Board",
     "Big Board Print View",
-    "Player Card / Ranking System"
+    "Player Card / Ranking System",
 ])
 
 import streamlit.components.v1 as components
@@ -1830,6 +1830,7 @@ with tab2:
         clicked_player = filtered_df.iloc[clicked_idx]["PLAYER"]
         if st.session_state.active_player != clicked_player:
             st.session_state.active_player = clicked_player
+            st.session_state.go_to_profile = True
             st.rerun()
 
 
@@ -1864,6 +1865,7 @@ with tab3:
                     clicked_player = tier_filtered.iloc[clicked_idx]["PLAYER"]
                     if st.session_state.active_player != clicked_player:
                         st.session_state.active_player = clicked_player
+                        st.session_state.go_to_profile = True
                         st.rerun()
 
 
@@ -2296,3 +2298,4 @@ with tab5:
                                     "</div>"
                                 )
                                 st.markdown(html, unsafe_allow_html=True)
+
