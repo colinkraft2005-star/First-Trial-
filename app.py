@@ -248,69 +248,86 @@ backfill_roster_bio()
 # ==========================================
 # HEADSHOT FETCHER
 # ==========================================
-def fetch_sr_headshot_silent(player_name, team_name=""):
-    cleaned_name = player_name.replace(".", "").replace(",", "")
-    safe_name = urllib.parse.quote(cleaned_name)
-    search_url = f"https://www.sports-reference.com/cbb/search/search.fcgi?search={safe_name}"
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    img_pattern = r'src="(https://www.sports-reference.com/req/[^"]+/cbb/images/players/[^"]+\.jpg)"'
-    suffix_words = ['jr', 'ii', 'iii', 'iv', 'v']
-    name_parts = cleaned_name.lower().split()
-    detected_suffix = name_parts[-1] if (name_parts and name_parts[-1] in suffix_words) else None
-
-    def parse_html_for_image(html, current_url):
-        match = re.search(img_pattern, html)
-        if match:
-            return match.group(1)
-        if "/cbb/search/search.fcgi" in current_url:
-            results = re.findall(r'href="(/cbb/players/([^"]+)\.html)"[^>]*>(.*?)<\/a>(.*?)(?:<\/div>|<li>|<tr|<td>)',
-                                 html, re.IGNORECASE | re.DOTALL)
-            if results:
-                for link, slug, display_name, context in results:
-                    if team_name and (team_name.lower() in context.lower() or team_name.lower() in display_name.lower()):
-                        if detected_suffix and f"-{detected_suffix}" not in slug.lower():
-                            continue
-                        return fetch_profile_image(link)
-                suffix_matches = []
-                for link, slug, display_name, context in results:
-                    if detected_suffix and f"-{detected_suffix}" in slug.lower():
-                        suffix_matches.append(link)
-                if suffix_matches:
-                    return fetch_profile_image(suffix_matches[-1])
-                try:
-                    def extract_num(r):
-                        num_match = re.search(r'-(\d+)$', r[1])
-                        return int(num_match.group(1)) if num_match else 0
-                    best_link = max(results, key=extract_num)[0]
-                    return fetch_profile_image(best_link)
-                except Exception:
-                    return fetch_profile_image(results[0][0])
+@st.cache_data(ttl=86400)
+def fetch_espn_headshot(player_name: str, team_espn_id: str = "") -> str:
+    """Fetch player headshot from ESPN search API by player name."""
+    if not player_name:
         return ""
-
-    def fetch_profile_image(player_page_path):
-        try:
-            player_url = f"https://www.sports-reference.com{player_page_path}"
-            player_response = requests.get(player_url, headers=headers, timeout=5, verify=False)
-            img_match = re.search(img_pattern, player_response.text)
-            return img_match.group(1) if img_match else ""
-        except Exception:
-            return ""
-
     try:
-        response = requests.get(search_url, headers=headers, timeout=5, verify=False)
-        img_url = parse_html_for_image(response.text, response.url)
-        if img_url:
-            return img_url
-        if detected_suffix:
-            base_name = " ".join(name_parts[:-1])
-            fallback_url = f"https://www.sports-reference.com/cbb/search/search.fcgi?search={urllib.parse.quote(base_name)}"
-            fallback_resp = requests.get(fallback_url, headers=headers, timeout=5, verify=False)
-            img_url = parse_html_for_image(fallback_resp.text, fallback_resp.url)
-            if img_url:
-                return img_url
+        url = f"https://site.api.espn.com/apis/search/v2?query={urllib.parse.quote(player_name)}&limit=5&type=player"
+        r = requests.get(url, timeout=5)
+        if r.status_code != 200:
+            return ""
+        name_lower = player_name.lower().strip()
+        for result in r.json().get("results", []):
+            for c in result.get("contents", []):
+                if c.get("displayName", "").lower().strip() == name_lower:
+                    img = c.get("image", {}).get("default", "")
+                    if img:
+                        # Prefer college basketball image if available
+                        athlete_id = img.split("/")[-1].replace(".png", "")
+                        college_url = f"https://a.espncdn.com/i/headshots/mens-college-basketball/players/full/{athlete_id}.png"
+                        test = requests.get(college_url, timeout=3)
+                        if test.status_code == 200 and "image" in test.headers.get("content-type", ""):
+                            return college_url
+                        return img
     except Exception:
         pass
     return ""
+
+
+def fetch_sr_headshot_silent(player_name, team_name=""):
+    # Legacy stub — ESPN roster lookup is now used instead
+    return ""
+
+
+@st.cache_data(ttl=86400)
+def fetch_espn_bio(player_name: str, team_espn_id: str) -> dict:
+    """Return weight and position from ESPN roster API, falling back to search API."""
+    name_lower = player_name.lower().strip()
+
+    # Try roster API first (has weight + position)
+    if team_espn_id:
+        try:
+            url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/teams/{team_espn_id}/roster"
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                for a in r.json().get("athletes", []):
+                    if a.get("displayName", "").lower().strip() == name_lower:
+                        return {
+                            "weight": a.get("displayWeight", ""),
+                            "position": a.get("position", {}).get("displayName", ""),
+                        }
+        except Exception:
+            pass
+
+    # Fall back to search API (has position, no weight)
+    try:
+        import urllib.parse as _ul
+        url = f"https://site.api.espn.com/apis/search/v2?query={_ul.quote(player_name)}&limit=5&type=player"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            for res in r.json().get("results", []):
+                for c in res.get("contents", []):
+                    if c.get("displayName", "").lower().strip() == name_lower:
+                        # Get full athlete record for position
+                        uid = c.get("uid", "")  # e.g. s:40~l:41~a:5107782
+                        aid = uid.split("~a:")[-1] if "~a:" in uid else ""
+                        if aid and "mens-college-basketball" in c.get("defaultLeagueSlug", "") + c.get("description", "").lower():
+                            ar = requests.get(
+                                f"https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/athletes/{aid}",
+                                timeout=5
+                            )
+                            if ar.status_code == 200:
+                                ath = ar.json().get("athlete", {})
+                                return {
+                                    "weight": ath.get("displayWeight", ""),
+                                    "position": ath.get("position", {}).get("displayName", ""),
+                                }
+    except Exception:
+        pass
+
+    return {}
 
 
 # ==========================================
@@ -374,6 +391,7 @@ def fetch_barttorvik_safe(top_filter=None, retries=3, delay_between_requests=4):
                         "BPM":         safe_float(row, 50),
                         "OBPM":        safe_float(row, 51),
                         "DBPM":        safe_float(row, 52),
+                        "SOS":         safe_float(row, 34),
                     })
                 return pd.DataFrame(cleaned_rows)
         except Exception:
@@ -2044,7 +2062,8 @@ with tab_card:
     saved_value_tag = db_row[11] if db_row and db_row[11] else "Properly Valued"
 
     if not saved_photo:
-        saved_photo = fetch_sr_headshot_silent(current_player, p_data["TEAM"])
+        _tid = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
+        saved_photo = fetch_espn_headshot(current_player, _tid)
         if db_row and saved_photo:
             cursor.execute("UPDATE player_notes SET photo_url = ? WHERE player_name = ?", (saved_photo, current_player))
             conn.commit()
@@ -2054,21 +2073,75 @@ with tab_card:
     TIER_OPTIONS = ["High Priority", "Mid Priority", "Low Priority"]
     VALUE_TAG_OPTIONS = ["Undervalued", "Properly Valued", "Overvalued"]
 
-    col_img, col_info = st.columns([1, 5])
+    # Advance class year: data is 2025-26, we're building for 2026-27
+    _class_advance = {"Fr": "So", "So": "Jr", "Jr": "Sr", "Sr": "Graduate", "Rs-Fr": "Fr", "Rs-So": "So", "Rs-Jr": "Jr", "Rs-Sr": "Sr"}
+    _raw_class = p_data.get("CLASS", "") if hasattr(p_data, "get") else (p_data["CLASS"] if "CLASS" in p_data.index else "")
+    _display_class = _class_advance.get(str(_raw_class).strip(), str(_raw_class).strip())
+
+    _tid = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
+    if not _tid:
+        try:
+            _gl_conn = sqlite3.connect("scouting_hub.db")
+            _tid_row = _gl_conn.execute(
+                "SELECT team_espn_id FROM player_game_logs WHERE player_name = ? AND team_espn_id IS NOT NULL LIMIT 1",
+                (current_player,)
+            ).fetchone()
+            _gl_conn.close()
+            if _tid_row:
+                _tid = str(_tid_row[0])
+        except Exception:
+            pass
+    _bio = fetch_espn_bio(current_player, _tid)
+    _weight = _bio.get("weight", "")
+    _position = _bio.get("position", "")
+
+    # KenPom SOS rank for the player's team
+    _sos_rank = None
+    try:
+        _kp_conn = sqlite3.connect("scouting_hub.db")
+        _sos_row = _kp_conn.execute(
+            "SELECT sos_rank FROM kenpom_sos WHERE kp_team = ?", (p_data["TEAM"],)
+        ).fetchone()
+        _kp_conn.close()
+        if _sos_row:
+            _sos_rank = _sos_row[0]
+    except Exception:
+        pass
+
+    col_img, col_info, col_board = st.columns([1.3, 2.9, 1.8])
     with col_img:
         if saved_photo:
-            st.image(saved_photo, width=130)
+            st.image(saved_photo, use_container_width=True)
         else:
             st.info("No headshot logged")
 
+    _conf_names = {
+        "A10": "Atlantic 10", "ACC": "ACC", "AE": "America East", "ASun": "ASUN",
+        "Amer": "American Athletic", "B10": "Big Ten", "B12": "Big 12", "BE": "Big East",
+        "BSky": "Big Sky", "BSth": "Big South", "BW": "Big West", "CAA": "CAA",
+        "CUSA": "Conference USA", "Horz": "Horizon League", "Ivy": "Ivy League",
+        "MAAC": "MAAC", "MAC": "MAC", "MEAC": "MEAC", "MVC": "Missouri Valley",
+        "MWC": "Mountain West", "NEC": "NEC", "OVC": "Ohio Valley", "Pat": "Patriot League",
+        "SB": "Sun Belt", "SC": "Southern Conference", "SEC": "SEC", "SWAC": "SWAC",
+        "Slnd": "Southland", "Sum": "Summit League", "WAC": "WAC", "WCC": "West Coast",
+    }
+    _conf_display = _conf_names.get(str(p_data["CONF"]), str(p_data["CONF"]))
+
     with col_info:
-        st.markdown(f"### {current_player}")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Program",    p_data["TEAM"])
-        c2.metric("Conference", p_data["CONF"])
-        c3.metric("Class",      p_data["CLASS"])
-        c4.metric("Height",     p_data["HEIGHT"])
-        st.caption(f"📅 **Last Evaluation Update Stamped:** {saved_date}")
+        st.markdown(f"## {current_player}")
+        _sos_str = f"&nbsp;&nbsp;·&nbsp;&nbsp;SOS: #{_sos_rank}" if _sos_rank else ""
+        st.markdown(f"**{p_data['TEAM']}** &nbsp;·&nbsp; {_conf_display}{_sos_str}")
+        bio_parts = []
+        if p_data["HEIGHT"]:
+            bio_parts.append(p_data["HEIGHT"])
+        if _weight:
+            bio_parts.append(_weight)
+        if _position:
+            bio_parts.append(_position)
+        if _display_class:
+            bio_parts.append(_display_class)
+        st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
+        st.caption(f"Last evaluation: {saved_date}")
 
     st.write("**Player Card — general stats, then BartTorvik / Synergy breakdown by category**")
     card_benchmarks = build_national_benchmarks(df_all)
@@ -2280,7 +2353,8 @@ with tab_card:
 
     if st.button("Save Scouting Report"):
         execution_date = datetime.now().strftime("%Y-%m-%d")
-        final_photo = photo_input if photo_input else fetch_sr_headshot_silent(current_player, p_data["TEAM"])
+        _tid2 = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
+        final_photo = photo_input if photo_input else fetch_espn_headshot(current_player, _tid2)
         conn = sqlite3.connect('scouting_hub.db')
         cursor = conn.cursor()
         cursor.execute('''
@@ -2354,9 +2428,16 @@ with tab_onepager:
     op_agent = (op_note_row[2] if op_note_row and op_note_row[2] else None) or "—"
     op_scout = (op_note_row[5] if op_note_row and op_note_row[5] else "")
     op_notes_raw = (op_note_row[4] if op_note_row and op_note_row[4] else "").strip()
-    op_photo = (op_note_row[3] if op_note_row and op_note_row[3] else "") or fetch_sr_headshot_silent(
-        op_player, op_team if op_team != "—" else ""
-    )
+    op_photo = op_note_row[3] if op_note_row and op_note_row[3] else ""
+    if not op_photo:
+        _op_tid = ""
+        try:
+            _op_row = df_all[df_all["PLAYER"] == op_player]
+            if not _op_row.empty and "team_espn_id" in _op_row.columns:
+                _op_tid = str(_op_row.iloc[0]["team_espn_id"])
+        except Exception:
+            pass
+        op_photo = fetch_espn_headshot(op_player, _op_tid)
 
     banner_lines = [ln.strip() for ln in op_notes_raw.split("\n") if ln.strip()][:3]
     banner_bullets_html = "".join(f'<li contenteditable="true">{ln}</li>' for ln in banner_lines)
@@ -2752,7 +2833,14 @@ with tab4:
 
     for idx, row in board_data.iterrows():
         if not row["photo_url"]:
-            fetched_img = fetch_sr_headshot_silent(row["player_name"], row["team_name"])
+            _board_tid = ""
+            try:
+                _br = df_all[df_all["PLAYER"] == row["player_name"]]
+                if not _br.empty and "team_espn_id" in _br.columns:
+                    _board_tid = str(_br.iloc[0]["team_espn_id"])
+            except Exception:
+                pass
+            fetched_img = fetch_espn_headshot(row["player_name"], _board_tid)
             if fetched_img:
                 cursor = conn.cursor()
                 cursor.execute("UPDATE player_notes SET photo_url = ? WHERE player_name = ?",
