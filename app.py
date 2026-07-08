@@ -1364,7 +1364,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_card, tab_depth, tab_onepager, tab2, tab3, tab4 = st.tabs([
+tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab5 = st.tabs([
     "Player Card",
     "Depth Chart",
     "One Pager",
@@ -1395,7 +1395,7 @@ components.html(f"""
 
     function tryRestore() {{
         var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-        if (tabs.length >= 6) {{
+        if (tabs.length >= 7) {{
             attachListeners(tabs);
             if (goToProfile || savedTab > 0) {{
                 tabs[savedTab].click();
