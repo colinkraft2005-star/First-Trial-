@@ -446,8 +446,17 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
                     NULLIF(SUM(p.ft_att), 0), 1)                                 AS FT_PCT,
                 ROUND(SUM(p.ft_att)*100.0 /
                     NULLIF(SUM(p.fg_att), 0), 1)                                 AS FTR,
+                ROUND(SUM(p.fg_made)*100.0 /
+                    NULLIF(SUM(p.fg_att), 0), 1)                                 AS FG_PCT,
+                ROUND(AVG(p.reb), 1)                                             AS RPG,
+                ROUND(AVG(p.ast), 1)                                             AS APG,
+                ROUND(AVG(p.stl), 1)                                             AS SPG,
+                ROUND(AVG(p.blk), 1)                                             AS BPG,
                 ROUND(SUM(CASE WHEN t.fga IS NOT NULL THEN p.fg_att + 0.44*p.ft_att + p.tov END)*100.0 /
                     NULLIF(SUM(t.fga)+0.44*SUM(t.fta)+SUM(t.tov), 0), 1)        AS USG,
+                ROUND(SUM(p.tov)*100.0 /
+                    NULLIF(SUM(p.fg_att)+0.44*SUM(p.ft_att)+SUM(p.tov), 0), 1)  AS TOV_PCT,
+                ROUND(CAST(SUM(p.ast) AS REAL) / NULLIF(SUM(p.tov), 0), 2)      AS AST_TO,
                 ROUND(SUM(CASE WHEN t.fgm IS NOT NULL THEN p.ast END)*100.0 /
                     NULLIF(
                         (SUM(CASE WHEN t.fgm IS NOT NULL THEN p.min_played END)*1.0 /
@@ -597,15 +606,12 @@ def get_player_sos(espn_name: str, espn_team: str):
 
 
 @st.cache_data(ttl=3600)
-def load_player_shots(player_name: str, team_espn_id=None, max_opp_rank=None) -> pd.DataFrame:
-    """Return shot_chart rows for a player, optionally filtered by team and opponent KenPom rank."""
+def load_player_shots(player_name: str, team_espn_id=None) -> pd.DataFrame:
+    """Return shot_chart rows for a player, optionally filtered by team."""
     try:
         conn = sqlite3.connect("scouting_hub.db")
-        rank_clause = "AND gl.kp_opp_rank <= :rank" if max_opp_rank else ""
-        team_clause = "AND sc.team_id = :team_id" if team_espn_id else ""
         params = {"name": player_name}
-        if max_opp_rank:
-            params["rank"] = max_opp_rank
+        team_clause = "AND sc.team_id = :team_id" if team_espn_id else ""
         if team_espn_id:
             params["team_id"] = str(team_espn_id)
         df = pd.read_sql_query(
@@ -613,17 +619,11 @@ def load_player_shots(player_name: str, team_espn_id=None, max_opp_rank=None) ->
             SELECT sc.coord_x_norm AS x, sc.coord_y_norm AS y,
                    sc.scoring_play AS made, sc.shot_type, sc.points_attempted AS pts
             FROM shot_chart sc
-            JOIN player_game_logs gl
-                ON gl.game_date   = sc.game_date
-               AND gl.player_name = sc.player_name
-               AND gl.team_espn_id = sc.team_id
             WHERE sc.player_name = :name
               AND sc.shot_type != 'MadeFreeThrow'
               {team_clause}
-              {rank_clause}
             """,
-            conn,
-            params=params,
+            conn, params=params,
         )
         conn.close()
         return df
@@ -632,12 +632,23 @@ def load_player_shots(player_name: str, team_espn_id=None, max_opp_rank=None) ->
 
 
 def _draw_half_court(ax):
-    """Draw NCAA half-court lines on a matplotlib Axes. Court: x 0-50, y 0-47."""
+    """Draw NCAA half-court lines. Court: x 0-50 ft, y 0-47 ft (half court)."""
     COURT_COLOR = "#1a3a5c"
     LINE_COLOR  = "#e0e0e0"
     LW = 1.4
+    BASKET_X, BASKET_Y = 25.0, 5.25   # basket center (5'3" from baseline)
+    R3       = 22 + 1.75/12           # three-point arc radius: 22'1.75"
+    R_CORNER = 21 + 8/12              # corner 3 horizontal distance: 21'8"
+    CORNER_X_L = BASKET_X - R_CORNER  # x=3.333
+    CORNER_X_R = BASKET_X + R_CORNER  # x=46.667
+    # y where corner straight line meets the arc
+    CORNER_Y = BASKET_Y + math.sqrt(R3**2 - (CORNER_X_L - BASKET_X)**2)
 
     ax.set_facecolor(COURT_COLOR)
+    ax.set_xlim(0, 50)
+    ax.set_ylim(-2, 47)
+    ax.set_aspect("equal")
+    ax.axis("off")
     ax.set_xlim(0, 50)
     ax.set_ylim(-2, 47)
     ax.set_aspect("equal")
@@ -646,45 +657,123 @@ def _draw_half_court(ax):
     # Court outline
     ax.add_patch(Rectangle((0, 0), 50, 47, linewidth=LW, edgecolor=LINE_COLOR, facecolor=COURT_COLOR, zorder=1))
 
-    # Paint (NCAA: 12 ft wide, 19 ft deep — baseline to free throw line)
+    # Paint: 12 ft wide, centered at x=25; 19 ft from baseline to free throw line
     ax.add_patch(Rectangle((19, 0), 12, 19, linewidth=LW, edgecolor=LINE_COLOR, facecolor="#0d2a46", zorder=2))
 
     # Free throw line
     ax.plot([19, 31], [19, 19], color=LINE_COLOR, linewidth=LW, zorder=3)
 
-    # Free throw circle (upper half solid, lower half dashed) — r=6 ft, centered at free throw line
+    # Free throw circle r=6 ft centered on free throw line at x=25
     th_top = np.linspace(0, np.pi, 120)
     ax.plot(25 + 6*np.cos(th_top), 19 + 6*np.sin(th_top), color=LINE_COLOR, linewidth=LW, zorder=3)
     th_bot = np.linspace(np.pi, 2*np.pi, 120)
     ax.plot(25 + 6*np.cos(th_bot), 19 + 6*np.sin(th_bot), color=LINE_COLOR, linewidth=LW, linestyle="--", zorder=3)
 
-    # Restricted area arc (r=4 from basket center)
-    BASKET_X, BASKET_Y = 25.0, 5.25
+    # Restricted area arc r=4 ft
     th_ra = np.linspace(0, np.pi, 100)
     ax.plot(BASKET_X + 4*np.cos(th_ra), BASKET_Y + 4*np.sin(th_ra), color=LINE_COLOR, linewidth=LW, zorder=3)
 
-    # Backboard
-    ax.plot([21.5, 28.5], [4.0, 4.0], color=LINE_COLOR, linewidth=2.5, zorder=4)
+    # Backboard (6 ft wide, 4 ft from baseline)
+    ax.plot([22, 28], [4.0, 4.0], color=LINE_COLOR, linewidth=2.5, zorder=4)
 
     # Basket rim
     ax.add_patch(Circle((BASKET_X, BASKET_Y), 0.75, linewidth=LW, edgecolor="#FFA500", facecolor="none", zorder=4))
 
-    # 3-point arc (NCAA men's: 22'1.75" = 22.15 ft from basket center)
-    R3 = 22.15
-    # Angles where arc meets y=0 (baseline)
-    dx0 = math.sqrt(max(R3**2 - BASKET_Y**2, 0))
-    left_x  = BASKET_X - dx0  # ≈ 3.5
-    right_x = BASKET_X + dx0  # ≈ 46.5
-    right_ang = math.atan2(0 - BASKET_Y, right_x - BASKET_X)  # ≈ -0.24
-    left_ang  = math.atan2(0 - BASKET_Y, left_x  - BASKET_X)  # ≈ -2.90
-    # Arc going counterclockwise from right baseline to left baseline (over the top)
-    th_3 = np.linspace(right_ang, left_ang + 2*np.pi, 250)
+    # Three-point line: two straight corner segments + arc
+    # Corner straight lines from baseline up to where arc begins
+    ax.plot([CORNER_X_L, CORNER_X_L], [0, CORNER_Y], color=LINE_COLOR, linewidth=LW, zorder=3)
+    ax.plot([CORNER_X_R, CORNER_X_R], [0, CORNER_Y], color=LINE_COLOR, linewidth=LW, zorder=3)
+    # Arc from left corner junction to right corner junction (over the top)
+    ang_r = math.atan2(CORNER_Y - BASKET_Y, CORNER_X_R - BASKET_X)
+    ang_l = math.atan2(CORNER_Y - BASKET_Y, CORNER_X_L - BASKET_X)
+    th_3 = np.linspace(ang_r, ang_l, 300)
     ax.plot(BASKET_X + R3*np.cos(th_3), BASKET_Y + R3*np.sin(th_3),
             color=LINE_COLOR, linewidth=LW, zorder=3)
 
 
+_BX, _BY   = 25.0, 5.25          # basket center
+_R3        = 22 + 1.75/12        # arc radius: 22'1.75"
+_R_CORNER  = 21 + 8/12          # corner distance: 21'8"
+_CXL       = _BX - _R_CORNER    # 3.333
+_CXR       = _BX + _R_CORNER    # 46.667
+_CY        = _BY + math.sqrt(_R3**2 - (_R_CORNER)**2)  # ~9.83
+
+# Dividing angles (from basket) for mid-range and 3pt zones
+# Mid: split into 4 by angles at 45°, 90°(straight up), 135° from baseline
+_MID_ANGS  = [math.radians(a) for a in (45, 90, 135)]   # left, top, right dividers
+
+# 3pt above-break split: wing/top boundaries at 65° and 115°
+_THREE_ANGS = [math.radians(a) for a in (65, 90, 115)]  # corner/wing, top dividers
+
+
+def _shot_angle(x, y):
+    """Angle from basket, 0=right baseline, 90=straight up, 180=left baseline."""
+    return math.degrees(math.atan2(y - _BY, x - _BX)) % 360
+
+
+def _classify_zone(x, y, pts):
+    dist  = math.sqrt((x - _BX)**2 + (y - _BY)**2)
+    angle = _shot_angle(x, y)  # 0-360, but shots are 0-180
+
+    # Paint: inside restricted area (r≤4) or inside lane (x 19-31, y≤19) excluding RA
+    if dist <= 4.0 or (19 <= x <= 31 and y <= 19):
+        return "Paint"
+
+    is_three = (pts == 3) or (dist >= _R3) or (x <= _CXL) or (x >= _CXR)
+
+    if is_three:
+        if y <= _CY:  # corner zone (below arc junction)
+            return "Corner Left" if x < _BX else "Corner Right"
+        # Above-break: split at 65° and 115°
+        if angle > 115:
+            return "Wing Left"
+        elif angle >= 65:
+            return "Top"
+        else:
+            return "Wing Right"
+    else:
+        # Mid-range: 4 zones split by angles 45°, 90°, 135°
+        if angle > 135:
+            return "Mid Left"
+        elif angle > 90:
+            return "Mid Center-Left"
+        elif angle > 45:
+            return "Mid Center-Right"
+        else:
+            return "Mid Right"
+
+
+def _zone_fg_color(pct, zone=None):
+    """Cold blue → white → gold, relative to realistic FG% range per zone type."""
+    if pct is None:
+        return "#444444", "#ffffff"
+    # Set realistic low/high bounds per zone so colors are meaningful
+    if zone == "Paint":
+        lo, hi = 45.0, 75.0
+    elif zone in ("Corner Left", "Corner Right"):
+        lo, hi = 28.0, 48.0
+    elif zone in ("Wing Left", "Wing Right", "Top"):
+        lo, hi = 25.0, 42.0
+    else:  # mid-range zones
+        lo, hi = 30.0, 52.0
+    t = max(0.0, min(1.0, (pct - lo) / (hi - lo)))
+    if t < 0.5:
+        s = t / 0.5
+        r = int(30  + (255 - 30)  * s)
+        g = int(80  + (255 - 80)  * s)
+        b = int(200 + (255 - 200) * s)
+    else:
+        s = (t - 0.5) / 0.5
+        r = int(255)
+        g = int(255 + (160 - 255) * s)
+        b = int(255 + (0   - 255) * s)
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    text = "#ffffff" if lum < 160 else "#111111"
+    return f"#{r:02x}{g:02x}{b:02x}", text
+
+
 def draw_shot_chart(shots_df: pd.DataFrame, title: str = "") -> plt.Figure:
-    """Return a matplotlib Figure with half-court shot chart."""
+    """Zone-based shot chart: 10 zones color-coded by FG%."""
     shots_df = shots_df[shots_df["y"] >= 0].copy() if not shots_df.empty else shots_df
 
     fig, ax = plt.subplots(figsize=(6, 5.5))
@@ -698,36 +787,150 @@ def draw_shot_chart(shots_df: pd.DataFrame, title: str = "") -> plt.Figure:
             ax.set_title(title, color="white", fontsize=10, pad=6)
         return fig
 
-    made   = shots_df[shots_df["made"] == 1]
-    missed = shots_df[shots_df["made"] == 0]
+    # Classify every shot into a zone
+    shots_df["zone"] = shots_df.apply(
+        lambda r: _classify_zone(r["x"], r["y"], r["pts"]), axis=1
+    )
 
-    ax.scatter(missed["x"], missed["y"], c="#4a9eff", s=18, alpha=0.55,
-               linewidths=0.3, edgecolors="#2060bb", zorder=5, label="Miss")
-    ax.scatter(made["x"],   made["y"],   c="#FFD700", s=18, alpha=0.70,
-               linewidths=0.3, edgecolors="#cc9900", zorder=6, label="Make")
+    # Compute FG% per zone
+    zone_stats = {}
+    for zone, grp in shots_df.groupby("zone"):
+        made  = int(grp["made"].sum())
+        total = len(grp)
+        zone_stats[zone] = {"made": made, "total": total, "pct": made / total * 100}
+
+    # Reuse module-level geometry constants
+    BX, BY = _BX, _BY
+    R3     = _R3
+    CXL, CXR, CY = _CXL, _CXR, _CY
+
+    zone_centers = {
+        "Paint":            (25.0,  7.5),
+        "Mid Left":         (10.0, 14.0),
+        "Mid Center-Left":  (20.5, 23.0),
+        "Mid Center-Right": (29.5, 23.0),
+        "Mid Right":        (40.0, 14.0),
+        "Corner Left":      ( 1.8,  4.5),
+        "Corner Right":     (48.2,  4.5),
+        "Wing Left":        ( 7.0, 31.0),
+        "Top":              (25.0, 38.0),
+        "Wing Right":       (43.0, 31.0),
+    }
+
+    # Arc angles (right corner junction → left corner junction going CCW)
+    _ang_r = math.atan2(CY - BY, CXR - BX)   # ~22.8° right
+    _ang_l = math.atan2(CY - BY, CXL - BX)   # ~157.2° left
+
+    def _arc_pts(a_start, a_end, n=200):
+        """Arc points between two angles (radians). Positive = CCW."""
+        th = np.linspace(a_start, a_end, n)
+        return list(zip(BX + R3*np.cos(th), BY + R3*np.sin(th)))
+
+    def _ray_pt(deg, length=60):
+        a = math.radians(deg)
+        return BX + length*math.cos(a), BY + length*math.sin(a)
+
+    def _zone_patch(zone, bg, alpha=0.78):
+        kw = dict(facecolor=bg, alpha=alpha, zorder=2, linewidth=0)
+
+        if zone == "Paint":
+            # Semicircle around basket (radius 6.5 ft), closed to baseline
+            th = np.linspace(0, math.pi, 120)
+            xs = BX + 6.5 * np.cos(th)
+            ys = BY + 6.5 * np.sin(th)
+            verts = [(xs[0], 0)] + list(zip(xs, ys)) + [(xs[-1], 0)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Corner Left":
+            ax.add_patch(Rectangle((0, 0), CXL, CY, **kw))
+
+        elif zone == "Corner Right":
+            ax.add_patch(Rectangle((CXR, 0), 50 - CXR, CY, **kw))
+
+        elif zone == "Wing Left":
+            # Outside arc, from left corner junction to the 115° ray, out to sideline/top
+            a115 = math.radians(115)
+            arc = _arc_pts(_ang_l, a115)
+            rx, ry = _ray_pt(115)
+            # Zone: basket → 115° ray → arc → left corner junction → (0,CY) → (0,47) → back
+            # Simpler: fill from basket outward bounded by arc and sideline
+            verts = [(BX, BY), _ray_pt(115, 70)] + list(reversed(arc)) + [(CXL, CY), (0, CY), (0, 47), (25, 47)]
+            # Actually just fill the region: sideline left + top + 115° line + arc
+            verts = [(0, CY), (CXL, CY)] + arc + [_ray_pt(115, 55), (0, 47)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Top":
+            # Between 115° and 65° rays, outside arc, bounded by top wall
+            a115, a65 = math.radians(115), math.radians(65)
+            arc = _arc_pts(a115, a65)
+            rx_l, ry_l = _ray_pt(115, 55)
+            rx_r, ry_r = _ray_pt(65, 55)
+            verts = [(rx_l, ry_l)] + arc + [(rx_r, ry_r), (rx_r, 47), (rx_l, 47)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Wing Right":
+            # Outside arc, from 65° ray to right corner junction
+            a65 = math.radians(65)
+            arc = _arc_pts(a65, _ang_r)
+            verts = [_ray_pt(65, 55)] + arc + [(CXR, CY), (50, CY), (50, 47), (25, 47)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Mid Left":
+            # Between 135° ray and left arc end, inside arc, above corner zone
+            a135 = math.radians(135)
+            arc = _arc_pts(_ang_l, a135)
+            rx, ry = _ray_pt(135)
+            verts = [(CXL, CY)] + arc + [(rx, ry), (BX, BY)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Mid Center-Left":
+            # Between 135° and 90° rays, inside arc
+            a135, a90 = math.radians(135), math.radians(90)
+            arc = _arc_pts(a135, a90)
+            verts = [(BX, BY), _ray_pt(135)] + arc + [_ray_pt(90)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Mid Center-Right":
+            # Between 90° and 45° rays, inside arc
+            a90, a45 = math.radians(90), math.radians(45)
+            arc = _arc_pts(a90, a45)
+            verts = [(BX, BY), _ray_pt(90)] + arc + [_ray_pt(45)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+        elif zone == "Mid Right":
+            # Between 45° ray and right arc end, inside arc
+            a45 = math.radians(45)
+            arc = _arc_pts(a45, _ang_r)
+            verts = [(BX, BY), _ray_pt(45)] + arc + [(CXR, CY)]
+            ax.add_patch(plt.Polygon(verts, **kw))
+
+    for zone, cx_cy in zone_centers.items():
+        stats = zone_stats.get(zone)
+        if not stats or stats["total"] == 0:
+            continue
+        bg, fg = _zone_fg_color(stats["pct"], zone)
+        _zone_patch(zone, bg)
+        cx, cy = cx_cy
+        ax.text(cx, cy + 1.2, f"{stats['pct']:.0f}%",
+                ha="center", va="center", color=fg,
+                fontsize=8, fontweight="bold", zorder=6)
+        ax.text(cx, cy - 1.2, f"{stats['made']}/{stats['total']}",
+                ha="center", va="center", color=fg,
+                fontsize=6.5, zorder=6)
+
+    # Redraw court lines on top of zone fills
+    _draw_half_court(ax)
+
+    ax.set_xlim(0, 50)
+    ax.set_ylim(-2, 47)
+    ax.set_aspect("equal")
+    ax.axis("off")
 
     total = len(shots_df)
     makes = int(shots_df["made"].sum())
     pct   = makes / total * 100 if total else 0
-
-    threes = shots_df[shots_df["pts"] == 3]
-    twos   = shots_df[shots_df["pts"] == 2]
-    t3_m   = int(threes["made"].sum())
-    t2_m   = int(twos["made"].sum())
-    t3_pct = t3_m / len(threes) * 100 if len(threes) else 0
-    t2_pct = t2_m / len(twos) * 100 if len(twos) else 0
-
-    info = (f"{makes}/{total} FG ({pct:.1f}%)   "
-            f"2pt {t2_m}/{len(twos)} ({t2_pct:.1f}%)   "
-            f"3pt {t3_m}/{len(threes)} ({t3_pct:.1f}%)")
-    ax.text(25, -1.2, info, ha="center", va="top",
-            color="#cccccc", fontsize=6.5, zorder=7)
-
-    legend = ax.legend(handles=[
-        mpatches.Patch(color="#FFD700", label=f"Make ({makes})"),
-        mpatches.Patch(color="#4a9eff", label=f"Miss ({total-makes})"),
-    ], loc="upper right", fontsize=7, framealpha=0.25,
-       labelcolor="white", facecolor="#111827", edgecolor="none")
+    ax.text(25, -1.5, f"{makes}/{total} FG  ({pct:.1f}%)",
+            ha="center", va="top", color="#cccccc", fontsize=7, zorder=7)
 
     if title:
         ax.set_title(title, color="white", fontsize=9, pad=4)
@@ -889,6 +1092,42 @@ def build_national_benchmarks(df_all: pd.DataFrame) -> dict:
         if col in d.columns:
             benchmarks[col] = sorted(d[col].dropna().tolist())
     return benchmarks
+
+
+@st.cache_data(ttl=3600)
+def build_position_benchmarks(df_all: pd.DataFrame, box_df: pd.DataFrame) -> dict:
+    """Per-position sorted value lists for both BartTorvik and boxscore stats.
+    Returns {position_group: {stat: sorted_list}} for Guard, Wing, Big."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        pos_df = pd.read_sql_query("SELECT player_name, position_group FROM player_positions", conn)
+        conn.close()
+    except Exception:
+        return {}
+
+    result = {}
+    for grp in ("Guard", "Wing", "Big"):
+        names = set(pos_df[pos_df["position_group"] == grp]["player_name"])
+
+        # BartTorvik stats
+        d = merge_shot_zones(df_all[df_all["PLAYER"].isin(names)].copy())
+        if "AST" in d.columns and "TO" in d.columns:
+            d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
+        bm = {}
+        for col in NATIONAL_PCT_STATS + ["AST_TO"] + SHOT_ZONE_STATS:
+            if col in d.columns:
+                bm[col] = sorted(d[col].dropna().tolist())
+
+        # Boxscore stats
+        b = box_df[box_df["PLAYER"].isin(names)].copy()
+        for col in ["PPG", "RPG", "APG", "SPG", "BPG", "FG_PCT", "TS", "EFG", "TWO_P",
+                    "THREE_P", "FT_PCT", "FTR", "USG", "AST_PCT", "TOV_PCT", "AST_TO",
+                    "OR_PCT", "DR_PCT", "STL_PCT", "BLK_PCT"]:
+            if col in b.columns:
+                bm[col] = sorted(b[col].dropna().tolist())
+
+        result[grp] = bm
+    return result
 
 
 def national_pct(stat, value, benchmarks):
@@ -2108,13 +2347,6 @@ with tab_card:
     except Exception:
         pass
 
-    col_img, col_info, col_board = st.columns([1.3, 2.9, 1.8])
-    with col_img:
-        if saved_photo:
-            st.image(saved_photo, use_container_width=True)
-        else:
-            st.info("No headshot logged")
-
     _conf_names = {
         "A10": "Atlantic 10", "ACC": "ACC", "AE": "America East", "ASun": "ASUN",
         "Amer": "American Athletic", "B10": "Big Ten", "B12": "Big 12", "BE": "Big East",
@@ -2126,6 +2358,108 @@ with tab_card:
         "Slnd": "Southland", "Sum": "Summit League", "WAC": "WAC", "WCC": "West Coast",
     }
     _conf_display = _conf_names.get(str(p_data["CONF"]), str(p_data["CONF"]))
+
+    # Pull boxscore stats for header + stat grid
+    _hdr_box = load_consistent_boxscore_stats()
+    _hdr_row = _hdr_box[_hdr_box["PLAYER"] == current_player]
+    if len(_hdr_row) > 1:
+        _team_match = _hdr_row[_hdr_row["TEAM"].str.contains(str(p_data["TEAM"]), case=False, na=False)]
+        if not _team_match.empty:
+            _hdr_row = _team_match
+    _hdr = _hdr_row.iloc[0] if not _hdr_row.empty else None
+
+    # Position-filtered benchmarks (Guard/Wing/Big)
+    _pos_benchmarks = build_position_benchmarks(df_all, _hdr_box)
+
+    # Determine position group for this player
+    _player_pos_group = "Guard"  # default
+    try:
+        _pg_conn = sqlite3.connect("scouting_hub.db")
+        _pg_row = _pg_conn.execute(
+            "SELECT position_group FROM player_positions WHERE player_name = ?", (current_player,)
+        ).fetchone()
+        _pg_conn.close()
+        if _pg_row:
+            _player_pos_group = _pg_row[0]
+        elif _position:
+            # Fall back to ESPN bio position
+            _pos_lower = _position.lower()
+            if any(w in _pos_lower for w in ("center", "big")):
+                _player_pos_group = "Big"
+            elif any(w in _pos_lower for w in ("forward",)):
+                _player_pos_group = "Wing"
+            else:
+                _player_pos_group = "Guard"
+    except Exception:
+        pass
+
+    _active_bm = _pos_benchmarks.get(_player_pos_group, {})
+    _BOX_LOWER = {"TOV_PCT"}
+    _BT_LOWER  = {"TO"}
+
+    def _fmt(val, dec=1):
+        try:
+            return f"{float(val):.{dec}f}" if val is not None and str(val) not in ("", "nan", "None") else "—"
+        except Exception:
+            return "—"
+
+    def _box_pct(col, val):
+        vals = _active_bm.get(col)
+        if not vals or val is None:
+            return None
+        try:
+            v = float(val)
+            if math.isnan(v):
+                return None
+        except Exception:
+            return None
+        p = get_pct(v, vals)
+        return (100 - p) if col in _BOX_LOWER else p
+
+    def _chip(label, val, pct, suffix="", dec=1):
+        bg, fg = pct_color(pct)
+        disp = _fmt(val, dec)
+        if disp == "—":
+            bg, fg = "#EAECF0", "#1A1A1A"
+        val_str = f"{disp}{suffix}" if disp != "—" else "—"
+        return (
+            f"<div style='background:{bg};color:{fg};border-radius:6px;padding:5px 8px;"
+            f"display:flex;flex-direction:column;min-width:70px'>"
+            f"<span style='font-size:0.68rem;opacity:0.75'>{label}</span>"
+            f"<span style='font-size:0.95rem;font-weight:700'>{val_str}</span>"
+            f"</div>"
+        )
+
+    def _stat_row_colored(label, val, pct, suffix="", dec=1):
+        bg, fg = pct_color(pct)
+        disp = _fmt(val, dec)
+        val_str = f"{disp}{suffix}" if disp != "—" else "—"
+        if disp == "—":
+            bg, fg = "#EAECF0", "#1A1A1A"
+        pct_label = f"<span style='font-size:0.65rem;opacity:0.65;margin-left:4px'>({pct:.0f}th)</span>" if pct is not None else ""
+        return (
+            f"<div style='background:{bg};color:{fg};border-radius:5px;padding:5px 10px;"
+            f"display:flex;justify-content:space-between;align-items:center;margin-bottom:3px'>"
+            f"<span style='font-size:0.75rem;opacity:0.8'>{label}</span>"
+            f"<span style='font-size:0.9rem;font-weight:700'>{val_str}{pct_label}</span>"
+            f"</div>"
+        )
+
+    def _cat_table(title, rows_html):
+        return (
+            f"<div style='margin-bottom:16px'>"
+            f"<div style='font-size:1rem;font-weight:800;text-transform:uppercase;"
+            f"letter-spacing:0.05em;margin-bottom:6px'>{title}</div>"
+            f"{''.join(rows_html)}"
+            f"</div>"
+        )
+
+    col_img, col_info, col_stats = st.columns([1.3, 2.5, 2.2])
+    with col_img:
+        if saved_photo:
+            st.image(saved_photo, use_container_width=True)
+        else:
+            st.info("No headshot logged")
 
     with col_info:
         st.markdown(f"## {current_player}")
@@ -2143,18 +2477,102 @@ with tab_card:
         st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
         st.caption(f"Last evaluation: {saved_date}")
 
-    st.write("**Player Card — general stats, then BartTorvik / Synergy breakdown by category**")
+    with col_stats:
+        if _hdr is not None:
+            def _plain_chip(label, val, dec=1, suffix=""):
+                disp = _fmt(val, dec)
+                val_str = f"{disp}{suffix}" if disp != "—" else "—"
+                return (
+                    f"<div style='display:flex;flex-direction:column;min-width:60px'>"
+                    f"<span style='font-size:0.72rem;color:gray;letter-spacing:0.04em'>{label}</span>"
+                    f"<span style='font-size:1.6rem;font-weight:800;line-height:1.1'>{val_str}</span>"
+                    f"</div>"
+                )
+            _chips = [
+                _plain_chip("PPG",  _hdr.get("PPG")),
+                _plain_chip("RPG",  _hdr.get("RPG")),
+                _plain_chip("APG",  _hdr.get("APG")),
+                _plain_chip("SPG",  _hdr.get("SPG")),
+                _plain_chip("BPG",  _hdr.get("BPG")),
+                _plain_chip("FG%",  _hdr.get("FG_PCT"), suffix="%"),
+            ]
+            st.markdown(
+                f"<div style='display:flex;flex-wrap:wrap;gap:10px 20px;padding-top:10px'>{''.join(_chips)}</div>",
+                unsafe_allow_html=True
+            )
+
+    st.divider()
+
+    # ── Bucketed stat categories ──────────────────────────────────────────
     card_benchmarks = build_national_benchmarks(df_all)
+    if _hdr is not None:
+        _bt = p_data  # BartTorvik row for PRPG/BPM/OBPM/DBPM/ORTG/THREE_P_100
+
+        def _bt_pct(col, val):
+            # Use position-filtered benchmarks; fall back to national
+            vals = _active_bm.get(col)
+            if vals:
+                if not val or (isinstance(val, float) and math.isnan(val)):
+                    return None
+                try:
+                    p = get_pct(float(val), vals)
+                    return (100 - p) if col in _BT_LOWER else p
+                except Exception:
+                    return None
+            return national_pct(col, val, card_benchmarks)
+
+        eff_html = _cat_table("Efficiency", [
+            _stat_row_colored("ORTG",  _bt.get("ORTG"),  _bt_pct("ORTG",  _bt.get("ORTG"))),
+            _stat_row_colored("USG%",  _hdr.get("USG"),  _box_pct("USG",  _hdr.get("USG")),  "%"),
+            _stat_row_colored("TS%",   _hdr.get("TS"),   _box_pct("TS",   _hdr.get("TS")),   "%"),
+            _stat_row_colored("EFG%",  _hdr.get("EFG"),  _box_pct("EFG",  _hdr.get("EFG")),  "%"),
+        ])
+
+        imp_html = _cat_table("Impact", [
+            _stat_row_colored("PRPG",  _bt.get("PRPG"),  _bt_pct("PRPG",  _bt.get("PRPG"))),
+            _stat_row_colored("BPM",   _bt.get("BPM"),   _bt_pct("BPM",   _bt.get("BPM"))),
+            _stat_row_colored("OBPM",  _bt.get("OBPM"),  _bt_pct("OBPM",  _bt.get("OBPM"))),
+            _stat_row_colored("DBPM",  _bt.get("DBPM"),  _bt_pct("DBPM",  _bt.get("DBPM"))),
+        ])
+
+        play_html = _cat_table("Playmaking", [
+            _stat_row_colored("AST%",   _hdr.get("AST_PCT"), _box_pct("AST_PCT", _hdr.get("AST_PCT")), "%"),
+            _stat_row_colored("TOV%",   _hdr.get("TOV_PCT"), _box_pct("TOV_PCT", _hdr.get("TOV_PCT")), "%"),
+            _stat_row_colored("AST/TO", _hdr.get("AST_TO"),  _box_pct("AST_TO",  _hdr.get("AST_TO")),  "", 2),
+            _stat_row_colored("USG%",   _hdr.get("USG"),     _box_pct("USG",     _hdr.get("USG")),     "%"),
+        ])
+
+        shoot_html = _cat_table("Shooting", [
+            _stat_row_colored("TS%",     _hdr.get("TS"),       _box_pct("TS",      _hdr.get("TS")),      "%"),
+            _stat_row_colored("2P%",     _hdr.get("TWO_P"),    _box_pct("TWO_P",   _hdr.get("TWO_P")),   "%"),
+            _stat_row_colored("3P%",     _hdr.get("THREE_P"),  _box_pct("THREE_P", _hdr.get("THREE_P")), "%"),
+            _stat_row_colored("3P Rate", _bt.get("THREE_P_100"), _bt_pct("THREE_P", _bt.get("THREE_P_100")), " /100"),
+            _stat_row_colored("FT%",     _hdr.get("FT_PCT"),   _box_pct("FT_PCT",  _hdr.get("FT_PCT")),  "%"),
+            _stat_row_colored("FTR",     _hdr.get("FTR"),      _box_pct("FTR",     _hdr.get("FTR")),     "%"),
+        ])
+
+        reb_html = _cat_table("Rebounding", [
+            _stat_row_colored("OREB%", _hdr.get("OR_PCT"), _box_pct("OR_PCT", _hdr.get("OR_PCT")), "%"),
+            _stat_row_colored("DREB%", _hdr.get("DR_PCT"), _box_pct("DR_PCT", _hdr.get("DR_PCT")), "%"),
+            _stat_row_colored("RPG",   _hdr.get("RPG"),    _box_pct("RPG",    _hdr.get("RPG"))),
+        ])
+
+        def_html = _cat_table("Defense", [
+            _stat_row_colored("STL%",  _hdr.get("STL_PCT"), _box_pct("STL_PCT", _hdr.get("STL_PCT")), "%"),
+            _stat_row_colored("BLK%",  _hdr.get("BLK_PCT"), _box_pct("BLK_PCT", _hdr.get("BLK_PCT")), "%"),
+            _stat_row_colored("DBPM",  _bt.get("DBPM"),     _bt_pct("DBPM",     _bt.get("DBPM"))),
+            _stat_row_colored("SPG",   _hdr.get("SPG"),     _box_pct("SPG",     _hdr.get("SPG"))),
+            _stat_row_colored("BPG",   _hdr.get("BPG"),     _box_pct("BPG",     _hdr.get("BPG"))),
+        ])
+
+        st.caption(f"Percentiles vs. all {_player_pos_group}s nationally")
+        col_left, col_right = st.columns(2)
+        with col_left:
+            st.markdown(eff_html + shoot_html + play_html, unsafe_allow_html=True)
+        with col_right:
+            st.markdown(imp_html + reb_html + def_html, unsafe_allow_html=True)
+
     curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
-    card_player = curated_player or {
-        "name": current_player, "school": p_data["TEAM"], "pos": saved_pos,
-        "cls": p_data["CLASS"], "height": p_data["HEIGHT"], "tier": saved_tier,
-        "projection": "", "role": saved_role, "tags": [],
-    }
-    components.html(
-        render_tile_card_html(card_player, df_all, card_benchmarks, show_writeup=False),
-        height=900, scrolling=True,
-    )
 
     st.write("**Competition Split**")
 
@@ -2181,7 +2599,7 @@ with tab_card:
 
         # Shot chart section — use matched team_espn_id to avoid name collisions
         _team_id = _pbox.iloc[0]["team_espn_id"] if not _pbox.empty and "team_espn_id" in _pbox.columns else None
-        _shots = load_player_shots(current_player, _team_id, _max_rank)
+        _shots = load_player_shots(current_player, _team_id)
         if not _shots.empty:
             st.write("**Shot Chart**")
             _chart_title = f"{current_player}  ·  {_split}"
