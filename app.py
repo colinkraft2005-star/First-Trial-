@@ -454,6 +454,7 @@ def load_consistent_boxscore_stats(max_opp_rank=None, conf_ids=None, exclude_con
                 p.team_espn_id,
                 p.team_name                                                      AS TEAM,
                 COUNT(*)                                                         AS GP,
+                ROUND(AVG(p.min_played), 1)                                      AS MPG,
                 ROUND(AVG(p.pts), 1)                                             AS PPG,
                 ROUND(SUM(p.pts)*100.0 /
                     NULLIF(2.0*(SUM(p.fg_att)+0.44*SUM(p.ft_att)), 0), 1)       AS TS,
@@ -2547,10 +2548,11 @@ with tab_card:
 
         def _stats_table_row(row_label, r):
             if r is None:
-                return f"<tr><td>{row_label}</td>" + "<td>—</td>" * 15 + "</tr>"
+                return f"<tr><td>{row_label}</td>" + "<td>—</td>" * 16 + "</tr>"
             return (
                 f"<tr><td style='font-weight:600'>{row_label}</td>"
                 f"<td>{_row_num(r.get('GP'), 0)}</td>"
+                f"<td>{_row_num(r.get('MPG'))}</td>"
                 f"<td>{_row_num(r.get('PPG'))}</td>"
                 f"<td>{_row_num(r.get('RPG'))}</td>"
                 f"<td>{_row_num(r.get('APG'))}</td>"
@@ -2593,7 +2595,7 @@ with tab_card:
             "text-transform:uppercase;border-bottom:2px solid #e5e7eb;}"
             ".card-stats-table td{text-align:center;padding:5px 6px;border-bottom:1px solid #f0f0f0;}</style>"
             "<table class='card-stats-table'><thead><tr>"
-            "<th></th><th>GP</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>"
+            "<th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>"
             "<th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>"
             "<th>AST%</th><th>OR%</th><th>DR%</th>"
             "</tr></thead><tbody>" + _stats_rows_html + "</tbody></table>",
@@ -2634,6 +2636,7 @@ with tab_card:
             _stat_row_colored("BPM",   _bt.get("BPM"),   _bt_pct("BPM",   _bt.get("BPM"))),
             _stat_row_colored("OBPM",  _bt.get("OBPM"),  _bt_pct("OBPM",  _bt.get("OBPM"))),
             _stat_row_colored("DBPM",  _bt.get("DBPM"),  _bt_pct("DBPM",  _bt.get("DBPM"))),
+            _stat_row_colored("MIN%",  _bt.get("MIN_PCT"), _bt_pct("MIN_PCT", _bt.get("MIN_PCT")), "%"),
         ])
 
         play_html = _cat_table("Playmaking", [
@@ -3062,10 +3065,11 @@ with tab_onepager:
 
     def _op_stats_row(label, r):
         if r is None:
-            return f"<tr><td>{label}</td>" + "<td>—</td>" * 15 + "</tr>"
+            return f"<tr><td>{label}</td>" + "<td>—</td>" * 16 + "</tr>"
         return (
             f"<tr><td>{label}</td>"
             f"<td>{_op_num(r.get('GP'), 0)}</td>"
+            f"<td>{_op_num(r.get('MPG'))}</td>"
             f"<td>{_op_num(r.get('PPG'))}</td>"
             f"<td>{_op_num(r.get('RPG'))}</td>"
             f"<td>{_op_num(r.get('APG'))}</td>"
@@ -3092,7 +3096,7 @@ with tab_onepager:
         stats_table_html = f"""
         <table class="stats">
           <thead><tr>
-            <th></th><th>GP</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>
+            <th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>
             <th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>
             <th>AST%</th><th>OR%</th><th>DR%</th>
           </tr></thead>
