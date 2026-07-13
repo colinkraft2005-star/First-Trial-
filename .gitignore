@@ -2,6 +2,17 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Database files — regenerate locally with build scripts
+*.db
+
+# Auth / session files
+synergy_session.json
+synergy_setup_auth.py
+
+# Throwaway diagnostic scripts
+diagnose_errors.py
+retry_missing.py
+
 # Synergy exploration/probe scripts (not production)
 synergy_explore.py
 synergy_full.py

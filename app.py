@@ -5,6 +5,7 @@ import sqlite3
 import urllib.parse
 import re
 import math
+import json
 import ssl
 import urllib3
 import time
@@ -499,24 +500,26 @@ def get_pct(val, sorted_vals: list):
 
 
 def pct_color(pct):
-    """Blue (0th pct) → White (50th pct) → Gold (100th pct). Returns (bg_hex, text_hex)."""
+    """Blue (0th pct) → Grey (50th pct) → Gold (100th pct). Returns (bg_hex, text_hex)."""
     if pct is None:
         return "#EAECF0", "#1A1A1A"
     t = max(0.0, min(100.0, pct)) / 100.0
+    # Midpoint: grey #A8A8A8
+    MR, MG, MB = 168, 168, 168
     if t <= 0.5:
-        # Blue (#2774AE) → White (#FFFFFF)
+        # Blue (#2774AE) → Grey (#A8A8A8)
         s = t / 0.5
-        r = int(39  + (255 - 39)  * s)
-        g = int(116 + (255 - 116) * s)
-        b = int(174 + (255 - 174) * s)
+        r = int(39  + (MR - 39)  * s)
+        g = int(116 + (MG - 116) * s)
+        b = int(174 + (MB - 174) * s)
     else:
-        # White (#FFFFFF) → Gold (#FFD100)
+        # Grey (#A8A8A8) → Gold (#FFD100)
         s = (t - 0.5) / 0.5
-        r = int(255 + (255 - 255) * s)
-        g = int(255 + (209 - 255) * s)
-        b = int(255 + (0   - 255) * s)
+        r = int(MR + (255 - MR) * s)
+        g = int(MG + (209 - MG) * s)
+        b = int(MB + (0   - MB) * s)
     lum = 0.299 * r + 0.587 * g + 0.114 * b
-    text = "#FFFFFF" if lum < 148 else "#1A1A1A"
+    text = "#FFFFFF" if lum < 120 else "#1A1A1A"
     return f"#{r:02x}{g:02x}{b:02x}", text
 
 
@@ -1279,6 +1282,91 @@ def _tile_html(label, value, pct):
             f'<div class="v" style="color:{fg};">{value}</div>{pct_label}</div>')
 
 
+# Friendly display names for Synergy play types
+_PLAYTYPE_LABELS = {
+    "PandRBallHandler": "PnR Ball Handler",
+    "PandRRollMan":     "PnR Roll Man",
+    "Iso":              "Isolation",
+    "PostUp":           "Post Up",
+    "SpotUp":           "Spot Up",
+    "Cut":              "Cut",
+    "OffScreen":        "Off Screen",
+    "HandOff":          "Hand Off",
+    "Transition":       "Transition",
+}
+
+# Stats to show per play type (column, label, suffix, decimals, lower_is_better)
+_PLAYTYPE_STATS = [
+    ("ppp",       "PPP",      "",  2, False),
+    ("fg_pct",    "FG%",      "%", 1, False),
+    ("turnover",  "TOV%",     "%", 1, True),
+    ("possessions","Poss",    "",  0, False),
+]
+
+@st.cache_data(ttl=3600)
+def get_synergy_playtype_rows(player_name: str, position_group: str):
+    """
+    Return a list of (play_type_label, stat_rows) for play types where the player
+    has qualifying volume, with percentile ranks vs their position group.
+    stat_rows: list of (stat_label, val, pct, suffix, dec)
+    """
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        pt_rows = conn.execute(
+            "SELECT play_type, possessions, ppp, fg_pct, fg_pct_eff, turnover, time_percent "
+            "FROM synergy_playtypes WHERE player_name = ? AND possessions > 0 "
+            "ORDER BY time_percent DESC NULLS LAST",
+            (player_name,)
+        ).fetchall()
+
+        result = []
+        for play_type, poss, ppp, fg_pct, fg_pct_eff, tov, time_pct in pt_rows:
+            label = _PLAYTYPE_LABELS.get(play_type, play_type)
+
+            def _synergy_pct(stat_col, val, lower_better=False):
+                if val is None:
+                    return None
+                bench_row = conn.execute(
+                    "SELECT sorted_values FROM synergy_percentiles "
+                    "WHERE play_type=? AND position_group=? AND stat=?",
+                    (play_type, position_group, stat_col)
+                ).fetchone()
+                if not bench_row:
+                    return None
+                bench = json.loads(bench_row[0])
+                p = get_pct(val, bench)
+                return (100 - p) if lower_better else p
+
+            # TOV% = turnovers / possessions (raw count → rate for display & percentile)
+            tov_rate = (tov / poss) if (tov is not None and poss and poss > 0) else None
+
+            stat_rows = []
+            for col, stat_label, suffix, dec, lower in _PLAYTYPE_STATS:
+                if col == "fg_pct":
+                    # DB stores as 0–1 fraction
+                    display_val = fg_pct * 100 if fg_pct is not None else None
+                    pct_val = fg_pct
+                elif col == "turnover":
+                    # bench now stores tov/poss rates; compare on the same scale
+                    display_val = tov_rate * 100 if tov_rate is not None else None
+                    pct_val = tov_rate
+                elif col == "possessions":
+                    display_val = poss
+                    pct_val = poss
+                else:
+                    display_val = {"ppp": ppp}.get(col)
+                    pct_val = display_val
+                pct = _synergy_pct(col, pct_val, lower)
+                stat_rows.append((stat_label, display_val, pct, suffix, dec))
+
+            result.append((label, time_pct, stat_rows))
+
+        conn.close()
+        return result
+    except Exception:
+        return []
+
+
 def _tile_group_html(group_label, tiles):
     tiles_html = "".join(_tile_html(*tv) for tv in tiles)
     return (f'<div class="grp"><div class="grp-lab">{group_label}</div>'
@@ -1571,13 +1659,14 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_card, tab_depth, tab_onepager, tab2, tab3, tab4 = st.tabs([
+tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab_synergy = st.tabs([
     "Player Card",
     "Depth Chart",
     "One Pager",
     "Portal Discovery Engine",
     "Front Office Target Board",
-    "Big Board Print View"
+    "Big Board Print View",
+    "Synergy Play Types",
 ])
 
 import streamlit.components.v1 as components
@@ -2431,25 +2520,37 @@ with tab_card:
         )
 
     def _stat_row_colored(label, val, pct, suffix="", dec=1):
-        bg, fg = pct_color(pct)
-        disp = _fmt(val, dec)
+        bg, bubble_fg = pct_color(pct)
+        disp    = _fmt(val, dec)
         val_str = f"{disp}{suffix}" if disp != "—" else "—"
-        if disp == "—":
-            bg, fg = "#EAECF0", "#1A1A1A"
-        pct_label = f"<span style='font-size:0.65rem;opacity:0.65;margin-left:4px'>({pct:.0f}th)</span>" if pct is not None else ""
+        if pct is not None:
+            fill_w  = f"{pct:.1f}%"
+            pct_num = f"{pct:.0f}"
+            bubble = (
+                f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);background:{bg};"
+                f"color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;width:20px;height:20px;"
+                f"display:flex;align-items:center;justify-content:center;z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{pct_num}</div>"
+            )
+            fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
+        else:
+            fill   = ""
+            bubble = ""
         return (
-            f"<div style='background:{bg};color:{fg};border-radius:5px;padding:5px 10px;"
-            f"display:flex;justify-content:space-between;align-items:center;margin-bottom:3px'>"
-            f"<span style='font-size:0.75rem;opacity:0.8'>{label}</span>"
-            f"<span style='font-size:0.9rem;font-weight:700'>{val_str}{pct_label}</span>"
+            f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
+            f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:72px;text-align:right;flex-shrink:0'>{label}</span>"
+            f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
+            f"{fill}{bubble}"
+            f"</div>"
+            f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
             f"</div>"
         )
 
     def _cat_table(title, rows_html):
         return (
-            f"<div style='margin-bottom:16px'>"
-            f"<div style='font-size:1rem;font-weight:800;text-transform:uppercase;"
-            f"letter-spacing:0.05em;margin-bottom:6px'>{title}</div>"
+            f"<div style='margin-bottom:20px'>"
+            f"<div style='font-size:1.05rem;font-weight:900;text-transform:uppercase;"
+            f"letter-spacing:0.08em;margin-bottom:8px;color:#111;"
+            f"border-bottom:2px solid #ddd;padding-bottom:4px'>{title}</div>"
             f"{''.join(rows_html)}"
             f"</div>"
         )
@@ -3325,3 +3426,112 @@ with tab4:
                             "</div>",
                             unsafe_allow_html=True
                         )
+
+# ==========================================
+# TAB: SYNERGY PLAY TYPES
+# ==========================================
+with tab_synergy:
+    st.subheader("Synergy Play Types · 2021-22")
+
+    @st.cache_data(ttl=3600)
+    def _synergy_player_list():
+        try:
+            c = sqlite3.connect("scouting_hub.db")
+            rows = c.execute(
+                "SELECT DISTINCT player_name FROM synergy_playtypes ORDER BY player_name"
+            ).fetchall()
+            c.close()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
+
+    _syn_players = _synergy_player_list()
+
+    if not _syn_players:
+        st.info("Run build_synergy.py to populate play type data.")
+    else:
+        _syn_default = "Paolo Banchero" if "Paolo Banchero" in _syn_players else _syn_players[0]
+        _syn_idx = _syn_players.index(_syn_default)
+
+        _syn_col1, _syn_col2 = st.columns([2, 1])
+        with _syn_col1:
+            _syn_selected = st.selectbox(
+                "Player:", _syn_players, index=_syn_idx, key="synergy_player_select"
+            )
+        with _syn_col2:
+            _pos_options = ["Guard", "Wing", "Big"]
+            try:
+                _sc = sqlite3.connect("scouting_hub.db")
+                _syn_pos_row = _sc.execute(
+                    "SELECT position_group FROM player_positions WHERE player_name = ?",
+                    (_syn_selected,)
+                ).fetchone()
+                _sc.close()
+                _auto_pos = _syn_pos_row[0] if _syn_pos_row else "Wing"
+            except Exception:
+                _auto_pos = "Wing"
+            _syn_pos = st.radio(
+                "Position group:",
+                _pos_options,
+                index=_pos_options.index(_auto_pos),
+                horizontal=True,
+                key="synergy_pos_select"
+            )
+
+        _synergy_rows = get_synergy_playtype_rows(_syn_selected, _syn_pos)
+
+        if _synergy_rows:
+            st.caption(f"Percentiles vs. all {_syn_pos}s · 2021-22 NCAAMB")
+
+            def _playtype_block_tab(pt_label, time_pct, stat_rows):
+                time_str = f"{time_pct * 100:.1f}% of poss" if time_pct is not None else ""
+                header = (
+                    f"<div style='font-size:1.0rem;font-weight:900;text-transform:uppercase;"
+                    f"letter-spacing:0.06em;color:#111;border-bottom:2px solid #ddd;"
+                    f"padding-bottom:3px;margin-bottom:6px'>"
+                    f"{pt_label}"
+                    f"<span style='font-size:0.72rem;font-weight:400;color:#666;margin-left:8px'>{time_str}</span>"
+                    f"</div>"
+                )
+                rows_html = []
+                for sl, v, p, sfx, d in stat_rows:
+                    bg, bubble_fg = pct_color(p)
+                    disp = f"{v:.{d}f}" if v is not None else "—"
+                    val_str = f"{disp}{sfx}" if disp != "—" else "—"
+                    if p is not None:
+                        fill_w = f"{p:.1f}%"
+                        bubble = (
+                            f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);"
+                            f"background:{bg};color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;"
+                            f"width:20px;height:20px;display:flex;align-items:center;justify-content:center;"
+                            f"z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{p:.0f}</div>"
+                        )
+                        fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
+                    else:
+                        fill = bubble = ""
+                    rows_html.append(
+                        f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
+                        f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:72px;text-align:right;flex-shrink:0'>{sl}</span>"
+                        f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
+                        f"{fill}{bubble}</div>"
+                        f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
+                        f"</div>"
+                    )
+                return f"<div style='margin-bottom:18px'>{header}{''.join(rows_html)}</div>"
+
+            _synergy_rows_sorted = sorted(_synergy_rows, key=lambda r: r[1] or 0, reverse=True)
+            half = math.ceil(len(_synergy_rows_sorted) / 2)
+
+            _pt_left, _pt_right = st.columns(2)
+            with _pt_left:
+                st.markdown(
+                    "".join(_playtype_block_tab(*r) for r in _synergy_rows_sorted[:half]),
+                    unsafe_allow_html=True
+                )
+            with _pt_right:
+                st.markdown(
+                    "".join(_playtype_block_tab(*r) for r in _synergy_rows_sorted[half:]),
+                    unsafe_allow_html=True
+                )
+        else:
+            st.info(f"No Synergy play type data found for {_syn_selected}.")
