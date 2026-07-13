@@ -408,9 +408,26 @@ def load_all_data_v6():
 
 
 @st.cache_data(ttl=3600)
-def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
+def build_team_conf_map(df_all: pd.DataFrame) -> dict:
+    """{team_espn_id: CONF} — lets game logs (which only have opponent_espn_id) be matched
+    to a conference, via team_rankings (espn_id -> bart_name) -> df_all (TEAM -> CONF)."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        rankings = pd.read_sql_query("SELECT espn_id, bart_name FROM team_rankings", conn)
+        conn.close()
+        team_conf = dict(zip(df_all["TEAM"], df_all["CONF"]))
+        rankings["CONF"] = rankings["bart_name"].map(team_conf)
+        return dict(zip(rankings["espn_id"].astype(str), rankings["CONF"]))
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def load_consistent_boxscore_stats(max_opp_rank=None, conf_ids=None, exclude_conf_ids=False) -> pd.DataFrame:
     """
-    Box-score derived per-player stats, optionally filtered by opponent rank.
+    Box-score derived per-player stats, optionally filtered by opponent rank and/or
+    conference (conf_ids = set of opponent team_espn_ids to include, or exclude if
+    exclude_conf_ids=True — used for conference vs. non-conference splits).
     Joins player_game_logs with game_team_stats for rate stats (USG, AST, ORB, DRB, BLK, STL).
     Same formula for All Games / Top 100 / Top 50 — fully comparable currency.
     """
@@ -420,6 +437,10 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
             where = f"AND CAST(p.opp_rank AS INTEGER) <= {int(max_opp_rank)} AND CAST(p.opp_rank AS INTEGER) < 999"
         else:
             where = ""
+        if conf_ids:
+            ids_sql = ",".join("'" + str(i).replace("'", "") + "'" for i in conf_ids)
+            op = "NOT IN" if exclude_conf_ids else "IN"
+            where += f" AND p.opponent_espn_id {op} ({ids_sql})"
         # ortg_kp/usage_kp only exist once a KenPom build script has run (it ALTER TABLEs them
         # in) — fall back to NULL on fresh installs instead of crashing on "no such column".
         cols = {row[1] for row in conn.execute("PRAGMA table_info(player_game_logs)")}
@@ -434,6 +455,7 @@ def load_consistent_boxscore_stats(max_opp_rank=None) -> pd.DataFrame:
                 p.team_espn_id,
                 p.team_name                                                      AS TEAM,
                 COUNT(*)                                                         AS GP,
+                ROUND(AVG(p.min_played), 1)                                      AS MPG,
                 ROUND(AVG(p.pts), 1)                                             AS PPG,
                 ROUND(SUM(p.pts)*100.0 /
                     NULLIF(2.0*(SUM(p.fg_att)+0.44*SUM(p.ft_att)), 0), 1)       AS TS,
@@ -1077,21 +1099,45 @@ def merge_shot_zones(df_all: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=3600)
+def build_team_strength() -> pd.DataFrame:
+    """Real team strength (KenPom-derived AdjEM) per BartTorvik team name — a continuous
+    measure of level of competition, used instead of a blunt P5/non-P5 conference binary."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query("SELECT bart_name AS TEAM, adj_em AS TEAM_ADJ_EM FROM team_rankings", conn)
+        conn.close()
+        return df.dropna(subset=["TEAM"])
+    except Exception:
+        return pd.DataFrame()
+
+
+def add_derived_comp_stats(df_all: pd.DataFrame) -> pd.DataFrame:
+    """df_all + shot-zone profile, team-strength (AdjEM), and AST/TO ratio — the extra
+    signals the comp finder (and the card's percentile tiles) weigh in beyond raw box stats."""
+    d = merge_shot_zones(df_all.copy())
+    strength = build_team_strength()
+    if not strength.empty:
+        d = d.merge(strength, on="TEAM", how="left")
+    if "AST" in d.columns and "TO" in d.columns:
+        d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
+    return d
+
+
 # ---- national percentile benchmarks (BartTorvik, all D1) for the tile card front ----
 NATIONAL_PCT_STATS = ["PRPG", "BPM", "OBPM", "DBPM", "ORTG", "USG", "EFG", "TS",
                        "TWO_P", "THREE_P", "FTR", "FT_PCT", "AST", "TO", "OR", "DR",
                        "BLK", "STL", "MIN_PCT"]
 NATIONAL_LOWER_IS_BETTER = {"TO"}
+DERIVED_PCT_STATS = ["AST_TO", "TEAM_ADJ_EM"] + SHOT_ZONE_STATS
 
 
 @st.cache_data(ttl=3600)
 def build_national_benchmarks(df_all: pd.DataFrame) -> dict:
     """Sorted national value lists per stat, used to percentile-rank any player for the tile card."""
-    d = merge_shot_zones(df_all.copy())
-    if "AST" in d.columns and "TO" in d.columns:
-        d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
+    d = add_derived_comp_stats(df_all)
     benchmarks = {}
-    for col in NATIONAL_PCT_STATS + ["AST_TO"] + SHOT_ZONE_STATS:
+    for col in NATIONAL_PCT_STATS + DERIVED_PCT_STATS:
         if col in d.columns:
             benchmarks[col] = sorted(d[col].dropna().tolist())
     return benchmarks
@@ -1385,16 +1431,23 @@ POS_TAG_BUCKET = {
 # UNIVERSAL COMP FINDER — works for any player, not just curated portal targets.
 # Similarity is computed in percentile space (same national percentiles used for the
 # tile card / auto-tags), weighted by position bucket, with the weight boosted toward
-# whichever real-stat category the player is genuinely elite in, plus a small conference-
-# tier nudge (P5 vs non-P5) so comps skew toward players facing similar competition.
+# whichever real-stat category the player is genuinely elite in. Level of competition is
+# handled via TEAM_ADJ_EM (real KenPom team strength) in the weights below, not a blunt
+# P5/non-P5 binary — a strong non-P5 team and a weak P5 team should score differently.
 # ==========================================
 COMP_CATEGORY_STATS = {
     "Shooting":     ["THREE_P", "TWO_P", "TS", "EFG", "FT_PCT"],
-    "Playmaking":   ["AST", "TO"],
+    "Playmaking":   ["AST", "TO", "AST_TO"],
     "Rebounding":   ["OR", "DR"],
     "Defense":      ["BLK", "STL", "DBPM"],
     "Shot Profile": SHOT_ZONE_STATS,
 }
+
+# Stats that actually get the dominant-category boost — usually the same as COMP_CATEGORY_STATS,
+# except Playmaking excludes raw TO%: it's usage-inflated (high-usage playmakers naturally cough
+# it up more even when highly efficient), so boosting it alongside AST%/AST_TO would amplify a
+# mismatch that has nothing to do with the actual "elite playmaker" trait being matched on.
+COMP_BOOST_STATS = {**COMP_CATEGORY_STATS, "Playmaking": ["AST", "AST_TO"]}
 
 # PCT_RIM/PCT_MID/PCT_THREE = shot-selection profile (where a player actually scores from), and
 # *_FG_PCT = their real FG% from each of those zones (how well) — both from real shot-chart data.
@@ -1404,26 +1457,26 @@ COMP_BASE_WEIGHTS = {
               "TS": 0.06, "BPM": 0.06, "USG": 0.05, "EFG": 0.04, "OBPM": 0.03, "DBPM": 0.03,
               "OR": 0.02, "DR": 0.03, "BLK": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08,
               "PCT_THREE": 0.06, "PCT_RIM": 0.03, "PCT_MID": 0.02,
-              "THREE_FG_PCT": 0.04, "RIM_FG_PCT": 0.02, "MID_FG_PCT": 0.02},
+              "THREE_FG_PCT": 0.04, "RIM_FG_PCT": 0.02, "MID_FG_PCT": 0.02,
+              "PRPG": 0.07, "AST_TO": 0.05, "TEAM_ADJ_EM": 0.05},
     "Wing":  {"BPM": 0.13, "DBPM": 0.09, "STL": 0.09, "BLK": 0.09, "DR": 0.09, "OR": 0.07,
               "TS": 0.05, "EFG": 0.04, "THREE_P": 0.05, "AST": 0.04, "USG": 0.04, "ORTG": 0.04,
               "TO": 0.03, "OBPM": 0.04, "MIN_PCT": 0.04, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08,
               "PCT_THREE": 0.05, "PCT_RIM": 0.04, "PCT_MID": 0.02,
-              "THREE_FG_PCT": 0.03, "RIM_FG_PCT": 0.03, "MID_FG_PCT": 0.02},
+              "THREE_FG_PCT": 0.03, "RIM_FG_PCT": 0.03, "MID_FG_PCT": 0.02,
+              "PRPG": 0.06, "AST_TO": 0.03, "TEAM_ADJ_EM": 0.05},
     "Big":   {"ORTG": 0.11, "OR": 0.11, "DR": 0.11, "BLK": 0.09, "AST": 0.07, "TO": 0.06,
               "MIN_PCT": 0.06, "BPM": 0.06, "TS": 0.05, "USG": 0.04, "EFG": 0.03, "STL": 0.03,
               "DBPM": 0.03, "OBPM": 0.03, "THREE_P": 0.02, "FTR": 0.02, "FT_PCT": 0.02, "TWO_P": 0.02, "HEIGHT": 0.08,
               "PCT_RIM": 0.07, "PCT_MID": 0.03, "PCT_THREE": 0.03,
-              "RIM_FG_PCT": 0.05, "MID_FG_PCT": 0.02, "THREE_FG_PCT": 0.02},
+              "RIM_FG_PCT": 0.05, "MID_FG_PCT": 0.02, "THREE_FG_PCT": 0.02,
+              "PRPG": 0.06, "AST_TO": 0.02, "TEAM_ADJ_EM": 0.05},
 }
 
-CONF_TIER_BONUS = 0.05
-DOMINANT_CATEGORY_BOOST = 1.6
+DOMINANT_CATEGORY_BOOST = 3.0
 DOMINANT_CATEGORY_MIN_PCT = 70.0
-
-
-def conf_tier(conf):
-    return "P5" if conf in P5_CONFS else "Other"
+COMP_MIN_GP = 8       # exclude tiny/early-season samples from being potential comps
+COMP_MIN_MIN_PCT = 20  # exclude garbage-time/deep-bench players (real signal is too noisy)
 
 
 def find_player_dominant_category(stats_row, benchmarks):
@@ -1441,7 +1494,7 @@ def find_player_dominant_category(stats_row, benchmarks):
 def build_comp_weights(bucket, dominant_category):
     weights = dict(COMP_BASE_WEIGHTS.get(bucket, COMP_BASE_WEIGHTS["Wing"]))
     if dominant_category:
-        for stat in COMP_CATEGORY_STATS.get(dominant_category, []):
+        for stat in COMP_BOOST_STATS.get(dominant_category, []):
             if stat in weights:
                 weights[stat] *= DOMINANT_CATEGORY_BOOST
     total = sum(weights.values())
@@ -1451,7 +1504,7 @@ def build_comp_weights(bucket, dominant_category):
 def find_stat_comps(player_name, df_all, benchmarks, n=8, bucket_override=None):
     """Real-stat-driven comp finder for any player in df_all. Returns (results, dominant_category)
     where results is a sorted list of (match_score_0_to_1, candidate_row)."""
-    df_all = merge_shot_zones(df_all)
+    df_all = add_derived_comp_stats(df_all)
     match = df_all[df_all["PLAYER"] == player_name]
     if match.empty:
         return [], None
@@ -1462,12 +1515,14 @@ def find_stat_comps(player_name, df_all, benchmarks, n=8, bucket_override=None):
     dominant_category = find_player_dominant_category(target, benchmarks)
     weights = build_comp_weights(bucket, dominant_category)
 
-    target_tier = conf_tier(target.get("CONF", ""))
     target_name = str(target["PLAYER"])
     target_team = str(target["TEAM"])
 
+    # Small samples are noisy — a candidate matching on 5 games of variance isn't a real comp.
+    candidates = df_all[(df_all["GP"] >= COMP_MIN_GP) & (df_all["MIN_PCT"] >= COMP_MIN_MIN_PCT)]
+
     results = []
-    for _, row in df_all.iterrows():
+    for _, row in candidates.iterrows():
         if str(row["PLAYER"]) == target_name and str(row["TEAM"]) == target_team:
             continue
         cand_ht = parse_height_inches(row.get("HEIGHT", "6-6"))
@@ -1485,8 +1540,7 @@ def find_stat_comps(player_name, df_all, benchmarks, n=8, bucket_override=None):
                 continue
             score += w * (1 - abs(t_pct - c_pct) / 100.0)
 
-        bonus = CONF_TIER_BONUS if conf_tier(row.get("CONF", "")) == target_tier else -CONF_TIER_BONUS
-        score = max(0.0, min(1.0, score + bonus))
+        score = max(0.0, min(1.0, score))
         results.append((score, row))
 
     results.sort(key=lambda x: -x[0])
@@ -2555,7 +2609,7 @@ with tab_card:
             f"</div>"
         )
 
-    col_img, col_info, col_stats = st.columns([1.3, 2.5, 2.2])
+    col_img, col_info = st.columns([1, 4])
     with col_img:
         if saved_photo:
             st.image(saved_photo, use_container_width=True)
@@ -2578,29 +2632,78 @@ with tab_card:
         st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
         st.caption(f"Last evaluation: {saved_date}")
 
-    with col_stats:
-        if _hdr is not None:
-            def _plain_chip(label, val, dec=1, suffix=""):
-                disp = _fmt(val, dec)
-                val_str = f"{disp}{suffix}" if disp != "—" else "—"
-                return (
-                    f"<div style='display:flex;flex-direction:column;min-width:60px'>"
-                    f"<span style='font-size:0.72rem;color:gray;letter-spacing:0.04em'>{label}</span>"
-                    f"<span style='font-size:1.6rem;font-weight:800;line-height:1.1'>{val_str}</span>"
-                    f"</div>"
-                )
-            _chips = [
-                _plain_chip("PPG",  _hdr.get("PPG")),
-                _plain_chip("RPG",  _hdr.get("RPG")),
-                _plain_chip("APG",  _hdr.get("APG")),
-                _plain_chip("SPG",  _hdr.get("SPG")),
-                _plain_chip("BPG",  _hdr.get("BPG")),
-                _plain_chip("FG%",  _hdr.get("FG_PCT"), suffix="%"),
-            ]
-            st.markdown(
-                f"<div style='display:flex;flex-wrap:wrap;gap:10px 20px;padding-top:10px'>{''.join(_chips)}</div>",
-                unsafe_allow_html=True
+    # Basic box score, right below the header — Season plus Conference/Non-Conference splits.
+    if _hdr is not None:
+        def _row_num(v, d=1):
+            try:
+                return f"{float(v):.{d}f}"
+            except (TypeError, ValueError):
+                return "—"
+
+        def _row_pct(v):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return "—"
+            return f"{v:.1f}%" if v else "—"
+
+        def _stats_table_row(row_label, r):
+            if r is None:
+                return f"<tr><td>{row_label}</td>" + "<td>—</td>" * 16 + "</tr>"
+            return (
+                f"<tr><td style='font-weight:600'>{row_label}</td>"
+                f"<td>{_row_num(r.get('GP'), 0)}</td>"
+                f"<td>{_row_num(r.get('MPG'))}</td>"
+                f"<td>{_row_num(r.get('PPG'))}</td>"
+                f"<td>{_row_num(r.get('RPG'))}</td>"
+                f"<td>{_row_num(r.get('APG'))}</td>"
+                f"<td>{_row_num(r.get('SPG'))}</td>"
+                f"<td>{_row_num(r.get('BPG'))}</td>"
+                f"<td>{_row_pct(r.get('FG_PCT'))}</td>"
+                f"<td>{_row_pct(r.get('EFG'))}</td>"
+                f"<td>{_row_pct(r.get('TS'))}</td>"
+                f"<td>{_row_pct(r.get('TWO_P'))}</td>"
+                f"<td>{_row_pct(r.get('THREE_P'))}</td>"
+                f"<td>{_row_pct(r.get('USG'))}</td>"
+                f"<td>{_row_pct(r.get('AST_PCT'))}</td>"
+                f"<td>{_row_pct(r.get('OR_PCT'))}</td>"
+                f"<td>{_row_pct(r.get('DR_PCT'))}</td>"
+                "</tr>"
             )
+
+        _conf_map = build_team_conf_map(df_all)
+        _own_conf = p_data["CONF"]
+        _in_conf_ids = tuple(sorted(eid for eid, c in _conf_map.items() if c == _own_conf))
+
+        _conf_row = _non_conf_row = None
+        if _in_conf_ids:
+            _conf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids)
+            _cr = _conf_box[_conf_box["PLAYER"] == current_player]
+            _conf_row = _cr.iloc[0] if not _cr.empty else None
+
+            _nonconf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids, exclude_conf_ids=True)
+            _ncr = _nonconf_box[_nonconf_box["PLAYER"] == current_player]
+            _non_conf_row = _ncr.iloc[0] if not _ncr.empty else None
+
+        _stats_rows_html = _stats_table_row("Season", _hdr)
+        if _conf_row is not None or _non_conf_row is not None:
+            _stats_rows_html += _stats_table_row("Conference", _conf_row)
+            _stats_rows_html += _stats_table_row("Non-Conf", _non_conf_row)
+
+        st.markdown(
+            "<style>.card-stats-table{width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:8px;}"
+            ".card-stats-table th{text-align:center;padding:4px 6px;color:#6b7280;font-size:0.72rem;"
+            "text-transform:uppercase;border-bottom:2px solid #e5e7eb;}"
+            ".card-stats-table td{text-align:center;padding:5px 6px;border-bottom:1px solid #f0f0f0;}</style>"
+            "<table class='card-stats-table'><thead><tr>"
+            "<th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>"
+            "<th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>"
+            "<th>AST%</th><th>OR%</th><th>DR%</th>"
+            "</tr></thead><tbody>" + _stats_rows_html + "</tbody></table>",
+            unsafe_allow_html=True,
+        )
+        if _conf_row is None and _non_conf_row is None:
+            st.caption("Conference/Non-Conference split unavailable — couldn't match this team's conference to game log opponents.")
 
     st.divider()
 
@@ -2634,6 +2737,7 @@ with tab_card:
             _stat_row_colored("BPM",   _bt.get("BPM"),   _bt_pct("BPM",   _bt.get("BPM"))),
             _stat_row_colored("OBPM",  _bt.get("OBPM"),  _bt_pct("OBPM",  _bt.get("OBPM"))),
             _stat_row_colored("DBPM",  _bt.get("DBPM"),  _bt_pct("DBPM",  _bt.get("DBPM"))),
+            _stat_row_colored("MIN%",  _bt.get("MIN_PCT"), _bt_pct("MIN_PCT", _bt.get("MIN_PCT")), "%"),
         ])
 
         play_html = _cat_table("Playmaking", [
@@ -2740,8 +2844,8 @@ with tab_card:
             boost_note = f" boosted toward this player's real-stat strength: **{dominant_cat}**" if dominant_cat else ""
             st.write(f"**Top {len(top_matches)} comps from {len(df_all):,} current-season players** "
                      f"— height ±5in, weighted by **{comp_bucket}** profile{boost_note}, "
-                     f"conference tier nudges the ranking, shot-selection profile and zone FG% "
-                     f"(rim/mid/three) also weighted in where shot-chart data exists.")
+                     f"real KenPom team strength nudges the ranking, shot-selection profile and "
+                     f"zone FG% (rim/mid/three) also weighted in where shot-chart data exists.")
 
             def _zone_fmt(freq, eff):
                 eff_txt = f"{eff:.0f}% FG" if pd.notna(eff) else "no FG% sample"
@@ -2758,73 +2862,130 @@ with tab_card:
                     f"Three {_zone_fmt(tz['PCT_THREE'], tz['THREE_FG_PCT'])}"
                 )
 
+            COMP_STAT_LABELS = {
+                "ORTG": "ORtg", "AST": "AST%", "TO": "TO%", "STL": "STL%", "MIN_PCT": "Min%",
+                "THREE_P": "3P%", "TS": "TS%", "BPM": "BPM", "USG": "USG%", "EFG": "eFG%",
+                "OBPM": "OBPM", "DBPM": "DBPM", "OR": "OR%", "DR": "DR%", "BLK": "BLK%",
+                "FTR": "FT Rate", "FT_PCT": "FT%", "TWO_P": "2P%", "PRPG": "PRPG",
+                "AST_TO": "AST/TO", "TEAM_ADJ_EM": "Team AdjEM",
+                "PCT_RIM": "Rim FGA%", "PCT_MID": "Mid FGA%", "PCT_THREE": "3PT FGA%",
+                "RIM_FG_PCT": "Rim FG%", "MID_FG_PCT": "Mid FG%", "THREE_FG_PCT": "3PT FG%",
+            }
+
+            def _stat_val(row, stat):
+                v = row.get(stat)
+                if v is None or (isinstance(v, float) and math.isnan(v)):
+                    return None
+                if stat in ("TS", "EFG") and v <= 1.0:
+                    v = v * 100
+                return float(v)
+
+            def _plain_tile(label, value_str):
+                return (
+                    "<div style=\"flex:1;padding:6px 4px;text-align:center;border-right:1px solid #e5e7eb;background:#F1F5F9;\">"
+                    "<div style=\"font-size:12px;font-weight:600;color:#0F172A;\">" + value_str + "</div>"
+                    "<div style=\"font-size:7px;color:#64748B;text-transform:uppercase;margin-top:1px;\">" + label + "</div>"
+                    "</div>"
+                )
+
+            def _pct_tile(label, value, pct, decimals=1, suffix="%"):
+                bg, fg = pct_color(pct)
+                pct_txt = f"({pct:.0f}th)" if pct is not None else ""
+                val_txt = fmt(value, decimals, suffix) if value is not None else "—"
+                return (
+                    "<div style=\"flex:1;padding:6px 4px;text-align:center;border-right:1px solid #e5e7eb;background:" + bg + ";\">"
+                    "<div style=\"font-size:12px;font-weight:600;color:" + fg + ";\">" + val_txt + "</div>"
+                    "<div style=\"font-size:7px;color:" + fg + ";opacity:.75;text-transform:uppercase;margin-top:1px;\">" + label + "</div>"
+                    "<div style=\"font-size:7px;color:" + fg + ";opacity:.6;\">" + pct_txt + "</div>"
+                    "</div>"
+                )
+
             if not top_matches:
                 st.info("No close height/stat matches found in the current season database.")
             else:
-                for match_score, match_data in top_matches:
+                for _comp_idx, (match_score, match_data) in enumerate(top_matches):
                     pct = round(match_score * 100, 1)
                     c_name = str(match_data.get("PLAYER", ""))
                     c_team = str(match_data.get("TEAM", ""))
                     c_conf = str(match_data.get("CONF", ""))
                     c_ht   = str(match_data.get("HEIGHT", ""))
-                    c_bpm  = float(match_data.get("BPM", 0))
-                    c_usg  = float(match_data.get("USG", 0))
-                    c_efg  = float(match_data.get("EFG", 0))
-                    c_ts   = float(match_data.get("TS", 0))
-                    c_ts   = c_ts * 100 if c_ts <= 1.0 else c_ts
-                    c_ast  = float(match_data.get("AST", 0))
+                    c_class = str(match_data.get("CLASS", "") or "")
 
-                    def _zone_tile(freq, eff, label):
-                        eff_txt = f"{eff:.0f}% FG" if pd.notna(eff) else "—"
-                        return (
-                            "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                            "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{freq:.0f}%" + "</div>"
-                            "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">" + label + "</div>"
-                            "<div style=\"font-size:7px;color:#9ca3af;\">" + eff_txt + "</div>"
-                            "</div>"
-                        )
+                    # Basic box score — plain, no percentile, easy to scan at a glance.
+                    basic_row_html = (
+                        "<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                        + _plain_tile("PPG", fmt(_stat_val(match_data, "PPG"), 1))
+                        + _plain_tile("RPG", fmt(_stat_val(match_data, "RPG"), 1))
+                        + _plain_tile("APG", fmt(_stat_val(match_data, "APG"), 1)).replace("border-right:1px solid #e5e7eb;", "")
+                        + "</div>"
+                    )
+
+                    # Advanced stats — percentile-colored, same visual language as the Player Card.
+                    adv_stats = [("TS", "TS%"), ("USG", "USG%"), ("EFG", "eFG%"), ("BPM", "BPM"), ("AST", "AST%")]
+                    adv_html = ""
+                    for i, (stat, label) in enumerate(adv_stats):
+                        v = _stat_val(match_data, stat)
+                        p = national_pct(stat, v, card_benchmarks)
+                        tile = _pct_tile(label, v, p)
+                        if i == len(adv_stats) - 1:
+                            tile = tile.replace("border-right:1px solid #e5e7eb;", "")
+                        adv_html += tile
+                    adv_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
+                                    "overflow:hidden;margin-bottom:6px;\">" + adv_html + "</div>")
+
+                    # "Why matched" callout — the specific stats behind this player's dominant-category
+                    # boost, with real values, so it's clear *why* this is a comp, not just a score.
+                    why_html = ""
+                    if dominant_cat:
+                        cat_stats = COMP_BOOST_STATS.get(dominant_cat, [])
+                        cat_tiles = ""
+                        shown = 0
+                        for stat in cat_stats:
+                            v = _stat_val(match_data, stat)
+                            if v is None:
+                                continue
+                            p = national_pct(stat, match_data.get(stat), card_benchmarks)
+                            label = COMP_STAT_LABELS.get(stat, stat)
+                            decimals = 2 if stat == "AST_TO" else 1
+                            suffix = "" if stat in ("AST_TO", "BPM", "TEAM_ADJ_EM") else "%"
+                            cat_tiles += _pct_tile(label, v, p, decimals=decimals, suffix=suffix)
+                            shown += 1
+                        if shown:
+                            idx = cat_tiles.rfind("border-right:1px solid #e5e7eb;")
+                            if idx != -1:
+                                cat_tiles = cat_tiles[:idx] + cat_tiles[idx + len("border-right:1px solid #e5e7eb;"):]
+                            why_html = (
+                                "<div style=\"margin-bottom:6px;\">"
+                                "<div style=\"font-size:8px;font-weight:700;color:#92600a;text-transform:uppercase;"
+                                "letter-spacing:.04em;margin-bottom:4px;\">⭐ Matched on: " + dominant_cat + "</div>"
+                                "<div style=\"display:flex;border:1px solid #f9d98a;border-radius:5px;overflow:hidden;"
+                                "background:#fffdf7;\">" + cat_tiles + "</div>"
+                                "</div>"
+                            )
 
                     zone_row_html = ""
                     if pd.notna(match_data.get("PCT_RIM")):
-                        zone_row_html = (
-                            "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
-                            + _zone_tile(match_data["PCT_RIM"], match_data.get("RIM_FG_PCT"), "Rim FGA")
-                            + _zone_tile(match_data["PCT_MID"], match_data.get("MID_FG_PCT"), "Mid FGA")
-                            + _zone_tile(match_data["PCT_THREE"], match_data.get("THREE_FG_PCT"), "Three FGA").replace("border-right:1px solid #e5e7eb;", "")
-                            + "</div>"
+                        zone_html = (
+                            _pct_tile("Rim FGA", match_data["PCT_RIM"], None, decimals=0)
+                            + _pct_tile("Mid FGA", match_data["PCT_MID"], None, decimals=0)
+                            + _pct_tile("Three FGA", match_data["PCT_THREE"], None, decimals=0).replace("border-right:1px solid #e5e7eb;", "")
                         )
+                        zone_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
+                                          "overflow:hidden;margin-bottom:6px;\">" + zone_html + "</div>")
 
                     html = (
                         "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
                         "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
                         "<div>"
                         "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
-                        "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht + " &middot; " + c_team + " (" + c_conf + ")</div>"
+                        "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht
+                        + (" &middot; " + c_class if c_class else "") + " &middot; " + c_team + " (" + c_conf + ")</div>"
                         "</div>"
                         "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
                         "</div>"
-                        "<div style=\"display:flex;background:#f9fafb;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
-                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ts:.1f}%" + "</div>"
-                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">TS%</div>"
-                        "</div>"
-                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_usg:.1f}%" + "</div>"
-                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">USG%</div>"
-                        "</div>"
-                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_efg:.1f}%" + "</div>"
-                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">eFG%</div>"
-                        "</div>"
-                        "<div style=\"flex:1;padding:6px 0;text-align:center;border-right:1px solid #e5e7eb;\">"
-                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_bpm:.1f}" + "</div>"
-                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">BPM</div>"
-                        "</div>"
-                        "<div style=\"flex:1;padding:6px 0;text-align:center;\">"
-                        "<div style=\"font-size:11px;font-weight:500;color:#111827;\">" + f"{c_ast:.1f}%" + "</div>"
-                        "<div style=\"font-size:7px;color:#6b7280;text-transform:uppercase;\">AST%</div>"
-                        "</div>"
-                        "</div>"
+                        + basic_row_html
+                        + adv_row_html
+                        + why_html
                         + zone_row_html +
                         "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
                         "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
@@ -2832,6 +2993,10 @@ with tab_card:
                         "</div>"
                     )
                     st.markdown(html, unsafe_allow_html=True)
+                    if st.button(f"↗ Open {c_name}'s Player Card", key=f"comp_open_{current_player}_{_comp_idx}_{c_name}"):
+                        st.session_state.active_player = c_name
+                        st.session_state.go_to_profile = True
+                        st.rerun()
 
     st.divider()
 
@@ -2975,32 +3140,68 @@ with tab_onepager:
             return "—"
         return f"{v:.1f}%" if v else "—"
 
+    # Same box-score source and Season/Conference/Non-Conf split logic as the Player Card,
+    # so the two views always show matching numbers.
+    _op_hdr_box = load_consistent_boxscore_stats()
+    _op_hdr_row = _op_hdr_box[_op_hdr_box["PLAYER"] == op_player]
+    if len(_op_hdr_row) > 1:
+        _op_team_match = _op_hdr_row[_op_hdr_row["TEAM"].str.contains(str(op_team), case=False, na=False)]
+        if not _op_team_match.empty:
+            _op_hdr_row = _op_team_match
+    op_hdr = _op_hdr_row.iloc[0] if not _op_hdr_row.empty else None
+
+    op_conf_row = op_nonconf_row = None
     if op_stats is not None:
+        _op_conf_map = build_team_conf_map(df_all)
+        _op_own_conf = op_stats["CONF"]
+        _op_in_conf_ids = tuple(sorted(eid for eid, c in _op_conf_map.items() if c == _op_own_conf))
+        if _op_in_conf_ids:
+            _op_conf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids)
+            _ocr = _op_conf_box[_op_conf_box["PLAYER"] == op_player]
+            op_conf_row = _ocr.iloc[0] if not _ocr.empty else None
+
+            _op_nonconf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids, exclude_conf_ids=True)
+            _oncr = _op_nonconf_box[_op_nonconf_box["PLAYER"] == op_player]
+            op_nonconf_row = _oncr.iloc[0] if not _oncr.empty else None
+
+    def _op_stats_row(label, r):
+        if r is None:
+            return f"<tr><td>{label}</td>" + "<td>—</td>" * 16 + "</tr>"
+        return (
+            f"<tr><td>{label}</td>"
+            f"<td>{_op_num(r.get('GP'), 0)}</td>"
+            f"<td>{_op_num(r.get('MPG'))}</td>"
+            f"<td>{_op_num(r.get('PPG'))}</td>"
+            f"<td>{_op_num(r.get('RPG'))}</td>"
+            f"<td>{_op_num(r.get('APG'))}</td>"
+            f"<td>{_op_num(r.get('SPG'))}</td>"
+            f"<td>{_op_num(r.get('BPG'))}</td>"
+            f"<td>{_op_pct(r.get('FG_PCT'))}</td>"
+            f"<td>{_op_pct(r.get('EFG'))}</td>"
+            f"<td>{_op_pct(r.get('TS'))}</td>"
+            f"<td>{_op_pct(r.get('TWO_P'))}</td>"
+            f"<td>{_op_pct(r.get('THREE_P'))}</td>"
+            f"<td>{_op_pct(r.get('USG'))}</td>"
+            f"<td>{_op_pct(r.get('AST_PCT'))}</td>"
+            f"<td>{_op_pct(r.get('OR_PCT'))}</td>"
+            f"<td>{_op_pct(r.get('DR_PCT'))}</td>"
+            "</tr>"
+        )
+
+    if op_hdr is not None:
+        _op_rows_html = _op_stats_row("Season", op_hdr)
+        if op_conf_row is not None or op_nonconf_row is not None:
+            _op_rows_html += _op_stats_row("Conference", op_conf_row)
+            _op_rows_html += _op_stats_row("Non-Conf", op_nonconf_row)
+
         stats_table_html = f"""
         <table class="stats">
           <thead><tr>
-            <th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th>
-            <th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>
-            <th>AST%</th><th>OR%</th><th>DR%</th><th>BLK%</th><th>STL%</th>
+            <th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>
+            <th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>
+            <th>AST%</th><th>OR%</th><th>DR%</th>
           </tr></thead>
-          <tbody><tr>
-            <td>Season</td>
-            <td>{_op_num(op_stats.get('GP'), 0)}</td>
-            <td>{_op_num(op_stats.get('MPG'))}</td>
-            <td>{_op_num(op_stats.get('PPG'))}</td>
-            <td>{_op_num(op_stats.get('RPG'))}</td>
-            <td>{_op_num(op_stats.get('APG'))}</td>
-            <td>{_op_pct(op_stats.get('EFG'))}</td>
-            <td>{_op_pct(op_stats.get('TS'))}</td>
-            <td>{_op_pct(op_stats.get('TWO_P'))}</td>
-            <td>{_op_pct(op_stats.get('THREE_P'))}</td>
-            <td>{_op_pct(op_stats.get('USG'))}</td>
-            <td>{_op_pct(op_stats.get('AST'))}</td>
-            <td>{_op_pct(op_stats.get('OR'))}</td>
-            <td>{_op_pct(op_stats.get('DR'))}</td>
-            <td>{_op_pct(op_stats.get('BLK'))}</td>
-            <td>{_op_pct(op_stats.get('STL'))}</td>
-          </tr></tbody>
+          <tbody>{_op_rows_html}</tbody>
         </table>
         """
     else:
@@ -3042,27 +3243,39 @@ with tab_onepager:
   .sec h2 {{ font-size: 26px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }}
   .sec .rule {{ flex: 1; height: 5px; background: var(--rule); max-width: 55%; }}
   .statline {{ font-family: 'Arimo', Arial, sans-serif; font-size: 12px; font-weight: 700; margin-bottom: 6px; }}
-  table.stats {{ width: 100%; border-collapse: collapse; font-family: 'Arimo', Arial, sans-serif; font-size: 12.5px; }}
-  table.stats th {{ font-weight: 700; text-align: right; padding: 4px 5px; border-bottom: 1px solid #b9c4cf; color: #33475c; }}
+  table.stats {{ width: 100%; border-collapse: separate; border-spacing: 0; font-family: 'Arimo', Arial, sans-serif;
+    font-size: 13px; border: 1px solid #d7dfe7; border-radius: 6px; overflow: hidden; }}
+  table.stats th {{ font-weight: 700; text-align: right; padding: 8px 9px; background: var(--navy); color: #eaf0f7;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }}
   table.stats th:first-child {{ text-align: left; }}
-  table.stats td {{ text-align: right; padding: 5px; border-bottom: 1px solid #dfe5ea; color: #22384e; }}
-  table.stats td:first-child {{ text-align: left; font-weight: 400; }}
+  table.stats td {{ text-align: right; padding: 8px 9px; font-weight: 600; color: #22384e;
+    border-bottom: 1px solid #eef1f5; }}
+  table.stats tr:last-child td {{ border-bottom: none; }}
+  table.stats tr:nth-child(even) td {{ background: #f4f7fa; }}
+  table.stats td:first-child {{ text-align: left; font-weight: 700; color: var(--banner-blue); }}
   .notes-hint {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-bottom: 6px; }}
-  ul.notes {{ list-style: none; font-size: 17px; line-height: 1.45; }}
-  ul.notes li {{ padding-left: 30px; position: relative; margin-bottom: 9px; outline: none; }}
-  ul.notes li::before {{ content: "\\2756"; position: absolute; left: 4px; color: var(--navy); font-size: 14px; }}
+  ul.notes {{ list-style: none; font-size: 18.5px; line-height: 1.65; }}
+  ul.notes li {{ padding-left: 30px; position: relative; margin-bottom: 11px; outline: none; min-height: 1.2em; }}
+  ul.notes li::before {{ content: "\\2756"; position: absolute; left: 4px; color: var(--navy); font-size: 16px; }}
   ul.notes li:empty::after {{ content: "Click to add note..."; color: #b6c1cc; }}
   .attribution {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-top: 4px; font-style: italic; }}
-  .footer-line {{ margin-top: 34px; font-size: 24px; font-weight: 700; letter-spacing: 0.3px; }}
-  .footer-line.underline {{ text-decoration: underline; margin-bottom: 8px; }}
+  .footer-block {{ margin-top: 28px; }}
+  .footer-label {{ font-size: 20px; font-weight: 700; letter-spacing: 0.3px; text-decoration: underline;
+    margin-bottom: 6px; outline: none; min-height: 1.2em; }}
+  .footer-label:empty::after {{ content: "Click to add title..."; color: #b6c1cc; text-decoration: none; }}
+  .footer-fill {{ font-family: 'Arimo', sans-serif; font-size: 15px; min-height: 26px; border-bottom: 1px dashed #b9c4cf;
+    padding: 4px 2px; outline: none; }}
+  .footer-fill:empty::after {{ content: "Click to add instructions for Cronin..."; color: #b6c1cc; }}
   @media print {{
     body {{ background: #fff; padding: 0; }}
     .toolbar {{ display: none; }}
     .page {{ box-shadow: none; width: auto; min-height: auto; padding: 0.25in 0.35in; }}
     .notes-hint {{ display: none; }}
     .banner-notes li:empty, ul.notes li:empty {{ display: none; }}
+    .footer-fill:empty::after, .footer-label:empty::after {{ content: ""; }}
     .banner {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
     .sec .rule {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    table.stats {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
   }}
 </style>
 </head>
@@ -3095,8 +3308,14 @@ with tab_onepager:
   <ul class="notes" id="notesList">{staff_notes_html}</ul>
   <div class="attribution" contenteditable="true">Notes by: {op_scout}</div>
 
-  <div class="footer-line underline" contenteditable="true">HIGHLIGHTS ON iPAD</div>
-  <div class="footer-line" contenteditable="true">TWO FULL GAMES READY TO PUT ON iPAD</div>
+  <div class="footer-block">
+    <div class="footer-label" contenteditable="true"></div>
+    <div class="footer-fill" contenteditable="true"></div>
+  </div>
+  <div class="footer-block">
+    <div class="footer-label" contenteditable="true"></div>
+    <div class="footer-fill" contenteditable="true"></div>
+  </div>
 </div>
 <script>
   function addNote() {{
@@ -3109,7 +3328,7 @@ with tab_onepager:
 </body>
 </html>
 """
-    components.html(one_pager_html, height=1300, scrolling=True)
+    components.html(one_pager_html, height=1450, scrolling=True)
 
 
 # ==========================================
@@ -3246,12 +3465,43 @@ with tab2:
             st.session_state.active_player = filtered_df.iloc[rows[0]]["PLAYER"]
             st.session_state.go_to_profile = True
 
+    # BartTorvik's raw feed comes back at full float precision (e.g. 14.6471), which is what
+    # made this read like an unformatted spreadsheet export — round it for display via
+    # column_config instead of mutating the underlying data used for filtering/sorting above.
+    _pct_cols = {"USG", "EFG", "TS", "AST", "OR", "DR", "BLK", "STL", "FTR", "FT_PCT",
+                 "TWO_P", "THREE_P", "THREE_P_100", "MIN_PCT"}
+    _decimal_cols = {"PPG", "PRPG", "BPM", "OBPM", "DBPM", "SOS", "RPG", "APG", "TO"}
+    _discovery_col_config = {
+        "PLAYER": st.column_config.TextColumn("Player", pinned=True),
+        "TEAM": st.column_config.TextColumn("Team"),
+        "CONF": st.column_config.TextColumn("Conf"),
+        "CLASS": st.column_config.TextColumn("Class"),
+        "HEIGHT": st.column_config.TextColumn("Height"),
+        "GP": st.column_config.NumberColumn("GP", format="%d"),
+    }
+    for _c in filtered_df.columns:
+        if _c in _discovery_col_config:
+            continue
+        if _c in _pct_cols:
+            _discovery_col_config[_c] = st.column_config.NumberColumn(_c, format="%.1f%%")
+        elif _c in _decimal_cols:
+            _discovery_col_config[_c] = st.column_config.NumberColumn(_c, format="%.1f")
+
+    st.markdown(
+        "<style>"
+        "div[data-testid='stDataFrame'] { border: 1px solid #d7dfe7; border-radius: 8px; "
+        "overflow: hidden; box-shadow: 0 1px 3px rgba(15,23,42,0.06); }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
     event_discovery = st.dataframe(
         filtered_df,
         hide_index=True,
         on_select=_on_portal_row_click,
         selection_mode="single-row",
         height=650,
+        column_config=_discovery_col_config,
         key="discovery_df_select",
     )
 
