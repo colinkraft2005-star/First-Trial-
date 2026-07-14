@@ -10,7 +10,6 @@ import ssl
 import urllib3
 import time
 import bisect
-import unicodedata
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -73,6 +72,11 @@ section[data-testid="stMain"] > div { padding-top: 0 !important; }
     font-weight: 700;
     letter-spacing: 0.3px;
     white-space: nowrap;
+}
+
+/* Hide tab bar on Home tab; show on all others */
+[data-baseweb="tab-list"]:has([data-baseweb="tab"]:first-child[aria-selected="true"]) {
+    display: none !important;
 }
 
 /* Tab bar — negative margins bleed past block-container padding */
@@ -421,40 +425,6 @@ def build_team_conf_map(df_all: pd.DataFrame) -> dict:
         return dict(zip(rankings["espn_id"].astype(str), rankings["CONF"]))
     except Exception:
         return {}
-
-
-def _normalize_player_name(name: str) -> str:
-    """Collapse the small formatting differences between BartTorvik's player names and the
-    names in our locally-scraped game logs / shot chart (e.g. 'A.J. Staton-McCray' vs
-    'AJ Staton-McCray', 'Bukumirović' vs 'Bukumirovic', 'Labaron Philon' vs 'Labaron Philon Jr.')
-    so the two can still be joined by an exact-match lookup."""
-    if not name:
-        return ""
-    n = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode("ascii")
-    n = n.replace(".", "").lower().strip()
-    for suffix in (" jr", " sr", " ii", " iii", " iv"):
-        if n.endswith(suffix):
-            n = n[: -len(suffix)]
-    return re.sub(r"\s+", " ", n).strip()
-
-
-@st.cache_data(ttl=3600)
-def build_game_log_name_map() -> dict:
-    """{normalized_name: actual player_game_logs PLAYER string} — lets a BartTorvik name
-    resolve to whatever spelling the locally-scraped game logs / shot chart use."""
-    try:
-        conn = sqlite3.connect("scouting_hub.db")
-        names = pd.read_sql_query("SELECT DISTINCT player_name FROM player_game_logs", conn)["player_name"]
-        conn.close()
-        return {_normalize_player_name(n): n for n in names}
-    except Exception:
-        return {}
-
-
-def resolve_game_log_name(bart_name: str) -> str:
-    """Best-effort resolve a BartTorvik player name to its game-log/shot-chart spelling.
-    Falls back to the original name unchanged if no normalized match is found."""
-    return build_game_log_name_map().get(_normalize_player_name(bart_name), bart_name)
 
 
 @st.cache_data(ttl=3600)
@@ -1147,37 +1117,13 @@ def build_team_strength() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
-def build_team_context() -> pd.DataFrame:
-    """Team pace/offense/defense identity (KenPom AdjO/AdjD/AdjTempo) per BartTorvik team
-    name — powers the Player Card's Team Context tile and the comp cards' identity tag.
-    kenpom_team_rankings.kp_name already matches BartTorvik naming directly (verified
-    306/310 exact string matches against team_rankings.bart_name), so no espn_id join
-    is needed here — kenpom_team_rankings.espn_id is unreliable for a subset of mid-major
-    schools and must not be used to key this lookup."""
-    try:
-        conn = sqlite3.connect("scouting_hub.db")
-        df = pd.read_sql_query(
-            "SELECT kp_name AS TEAM, adj_o AS TEAM_ADJ_O, adj_d AS TEAM_ADJ_D, "
-            "adj_tempo AS TEAM_TEMPO FROM kenpom_team_rankings", conn
-        )
-        conn.close()
-        return df.dropna(subset=["TEAM"])
-    except Exception:
-        return pd.DataFrame()
-
-
 def add_derived_comp_stats(df_all: pd.DataFrame) -> pd.DataFrame:
-    """df_all + shot-zone profile, team-strength (AdjEM), team context (pace/off/def), and
-    AST/TO ratio — the extra signals the comp finder (and the card's percentile tiles)
-    weigh in beyond raw box stats."""
+    """df_all + shot-zone profile, team-strength (AdjEM), and AST/TO ratio — the extra
+    signals the comp finder (and the card's percentile tiles) weigh in beyond raw box stats."""
     d = merge_shot_zones(df_all.copy())
     strength = build_team_strength()
     if not strength.empty:
         d = d.merge(strength, on="TEAM", how="left")
-    context = build_team_context()
-    if not context.empty:
-        d = d.merge(context, on="TEAM", how="left")
     if "AST" in d.columns and "TO" in d.columns:
         d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
     return d
@@ -1187,16 +1133,23 @@ def add_derived_comp_stats(df_all: pd.DataFrame) -> pd.DataFrame:
 NATIONAL_PCT_STATS = ["PRPG", "BPM", "OBPM", "DBPM", "ORTG", "USG", "EFG", "TS",
                        "TWO_P", "THREE_P", "FTR", "FT_PCT", "AST", "TO", "OR", "DR",
                        "BLK", "STL", "MIN_PCT"]
-NATIONAL_LOWER_IS_BETTER = {"TO", "TEAM_ADJ_D"}
-DERIVED_PCT_STATS = ["AST_TO", "TEAM_ADJ_EM", "TEAM_ADJ_O", "TEAM_ADJ_D", "TEAM_TEMPO"] + SHOT_ZONE_STATS
+NATIONAL_LOWER_IS_BETTER = {"TO"}
+DERIVED_PCT_STATS = ["AST_TO", "TEAM_ADJ_EM"] + SHOT_ZONE_STATS
 
 
 @st.cache_data(ttl=3600)
+def _p5_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """Return only players from Power Five conferences."""
+    if "CONF" in df.columns:
+        return df[df["CONF"].isin(P5_CONFS)]
+    return df
+
+
 def build_national_benchmarks(df_all: pd.DataFrame) -> dict:
-    """Sorted national value lists per stat, used to percentile-rank any player for the tile card."""
-    d = add_derived_comp_stats(df_all)
+    """Sorted P5-only value lists per stat, used to percentile-rank any player for the tile card."""
+    d = add_derived_comp_stats(_p5_filter(df_all))
     benchmarks = {}
-    for col in NATIONAL_PCT_STATS + DERIVED_PCT_STATS:
+    for col in NATIONAL_PCT_STATS + DERIVED_PCT_STATS + ["THREE_P_100"]:
         if col in d.columns:
             benchmarks[col] = sorted(d[col].dropna().tolist())
     return benchmarks
@@ -1204,7 +1157,7 @@ def build_national_benchmarks(df_all: pd.DataFrame) -> dict:
 
 @st.cache_data(ttl=3600)
 def build_position_benchmarks(df_all: pd.DataFrame, box_df: pd.DataFrame) -> dict:
-    """Per-position sorted value lists for both BartTorvik and boxscore stats.
+    """Per-position sorted value lists (P5 only) for both BartTorvik and boxscore stats.
     Returns {position_group: {stat: sorted_list}} for Guard, Wing, Big."""
     try:
         conn = sqlite3.connect("scouting_hub.db")
@@ -1213,21 +1166,25 @@ def build_position_benchmarks(df_all: pd.DataFrame, box_df: pd.DataFrame) -> dic
     except Exception:
         return {}
 
+    df_p5 = _p5_filter(df_all)
+    _p5_names = set(df_p5["PLAYER"].tolist()) if not df_p5.empty else set()
+    box_p5 = box_df[box_df["PLAYER"].isin(_p5_names)] if not box_df.empty else box_df
+
     result = {}
     for grp in ("Guard", "Wing", "Big"):
         names = set(pos_df[pos_df["position_group"] == grp]["player_name"])
 
-        # BartTorvik stats
-        d = merge_shot_zones(df_all[df_all["PLAYER"].isin(names)].copy())
+        # BartTorvik stats — P5 players in this position group
+        d = merge_shot_zones(df_p5[df_p5["PLAYER"].isin(names)].copy())
         if "AST" in d.columns and "TO" in d.columns:
             d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
         bm = {}
-        for col in NATIONAL_PCT_STATS + ["AST_TO"] + SHOT_ZONE_STATS:
+        for col in NATIONAL_PCT_STATS + ["AST_TO", "THREE_P_100"] + SHOT_ZONE_STATS:
             if col in d.columns:
                 bm[col] = sorted(d[col].dropna().tolist())
 
         # Boxscore stats
-        b = box_df[box_df["PLAYER"].isin(names)].copy()
+        b = box_p5[box_p5["PLAYER"].isin(names)].copy()
         for col in ["PPG", "RPG", "APG", "SPG", "BPG", "FG_PCT", "TS", "EFG", "TWO_P",
                     "THREE_P", "FT_PCT", "FTR", "USG", "AST_PCT", "TOV_PCT", "AST_TO",
                     "OR_PCT", "DR_PCT", "STL_PCT", "BLK_PCT"]:
@@ -1758,7 +1715,7 @@ _gl_ready = game_log_db_ready()
 all_player_names = sorted(list(df_all["PLAYER"].unique()))
 
 if "active_player" not in st.session_state:
-    st.session_state.active_player = all_player_names[0]
+    st.session_state.active_player = None
 if "go_to_profile" not in st.session_state:
     st.session_state.go_to_profile = False
 
@@ -1772,7 +1729,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab_synergy = st.tabs([
+tab_home, tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab_synergy = st.tabs([
+    "Home",
     "Player Card",
     "Depth Chart",
     "One Pager",
@@ -1791,7 +1749,12 @@ components.html(f"""
 <script>
 (function() {{
     var goToProfile = {'true' if _go_to_profile else 'false'};
-    var savedTab = goToProfile ? 0 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
+    // v2: Home tab added at index 0 — wipe any stale saved index so we default to Home
+    if (localStorage.getItem('uclaTabVersion') !== '2') {{
+        localStorage.removeItem('uclaActiveTab');
+        localStorage.setItem('uclaTabVersion', '2');
+    }}
+    var savedTab = goToProfile ? 1 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
 
     function attachListeners(tabs) {{
         tabs.forEach(function(tab, i) {{
@@ -1803,11 +1766,11 @@ components.html(f"""
 
     function tryRestore() {{
         var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-        if (tabs.length >= 6) {{
+        if (tabs.length >= 8) {{
             attachListeners(tabs);
             if (goToProfile || savedTab > 0) {{
                 tabs[savedTab].click();
-                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '0'); }}
+                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '1'); }}
             }}
         }} else {{
             setTimeout(tryRestore, 100);
@@ -1829,6 +1792,13 @@ components.html(f"""
                             btns[i].click();
                             break;
                         }}
+                    }}
+                }} else if (evt.data && evt.data.type === 'nav_click') {{
+                    var tabIdx = evt.data.tab;
+                    var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+                    if (tabs.length > tabIdx) {{
+                        tabs[tabIdx].click();
+                        localStorage.setItem('uclaActiveTab', tabIdx);
                     }}
                 }}
             }});
@@ -1944,6 +1914,37 @@ def compute_lineup_stats_from_segments(players: list, segs: pd.DataFrame):
         "pts_per_min": round(t_pts / mins, 2) if mins else 0,
         "opp_per_min": round(o_pts / mins, 2) if mins else 0,
     }
+
+
+def _rank_players(query, names):
+    q = query.lower().strip()
+    if not q:
+        return names
+    results = []
+    for name in names:
+        nl = name.lower()
+        words = nl.split()
+        # Score 0: full name starts with query (e.g. "jamar" → "Jamar Brown")
+        if nl.startswith(q):
+            score = 0
+        # Score 1: any word starts with query AND it's a close match length-wise
+        elif any(w.startswith(q) for w in words):
+            # prefer first-name matches over last-name matches
+            if words[0].startswith(q):
+                score = 1
+            else:
+                score = 2
+        # Score 3: query is a substring of any word (e.g. "mar" inside "Jamar")
+        elif any(q in w for w in words):
+            score = 3
+        # Score 4: query appears anywhere in the full name
+        elif q in nl:
+            score = 4
+        else:
+            continue
+        results.append((score, name))
+    results.sort(key=lambda x: (x[0], x[1]))
+    return [n for _, n in results]
 
 
 # ==========================================
@@ -2321,86 +2322,34 @@ div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-
     if _top_lu.empty:
         st.info("No lineup segment data found.")
     else:
-        def color_net(val):
-            if val > 5:   return "background:#d1fae5;color:#065f46;font-weight:700;"
-            if val < -5:  return "background:#fee2e2;color:#991b1b;font-weight:700;"
-            return "color:#374151;font-weight:600;"
+        def _short_name(full):
+            parts = full.split()
+            if len(parts) >= 2 and parts[-1].lower() in ("jr.", "jr", "ii", "iii", "iv"):
+                return " ".join(parts[-2:])
+            return parts[-1] if parts else full
 
-        def color_stat(val, key):
-            pct = lineup_pct(key, val)
-            bg, fg = pct_color(pct)
-            return f"background:{bg};color:{fg};font-weight:700;"
+        _top_lu["Lineup"] = _top_lu["Lineup"].apply(
+            lambda s: " · ".join(_short_name(n) for n in s.split(" · "))
+        )
 
-        # Render as styled HTML table
-        th = "padding:6px 8px;text-align:center;font-size:10px;color:#64748b;letter-spacing:0.5px;font-weight:700;"
-        th_l = "padding:6px 10px;text-align:left;font-size:10px;color:#64748b;letter-spacing:0.5px;font-weight:700;"
-
-        def sec_header(label, colspan):
-            return f"<th colspan='{colspan}' style='{th}border-bottom:1px solid #e2e8f0;'>{label}</th>"
-
-        rows_html = ""
-        for _, row in _top_lu.iterrows():
-            net_s    = f"{row['Net']:+.1f}"
-            net_c    = color_net(row["Net"])
-            ortg_c   = color_stat(row["Off Rtg"],  "ortg")
-            ts_c     = color_stat(row["TS%"],       "ts")
-            tp_c     = color_stat(row["3P%"],       "three_pct")
-            tov_c    = color_stat(row["TOV%"],      "tov_rate")
-            drtg_c   = color_stat(row["Def Rtg"],   "drtg")
-            opp_ts_c = color_stat(row["Opp TS%"],   "opp_ts")
-            opp_tv_c = color_stat(row["Opp TOV%"],  "opp_tov_rate")
-            drb_c    = color_stat(row["DReb%"],      "drb_pct")
-
-            def _short_name(full):
-                parts = full.split()
-                if len(parts) >= 2 and parts[-1].lower() in ("jr.", "jr", "ii", "iii", "iv"):
-                    return " ".join(parts[-2:])
-                return parts[-1] if parts else full
-            names = [_short_name(n) for n in row["Lineup"].split(" · ")]
-            lineup_str = " · ".join(names)
-            td = "padding:7px 8px;text-align:center;font-size:12px;"
-            rows_html += (
-                f"<tr style='border-bottom:1px solid #f1f5f9;'>"
-                f"<td style='padding:7px 10px;font-size:12px;color:#0f172a;white-space:nowrap;'>{lineup_str}</td>"
-                f"<td style='{td}color:#64748b;'>{row['Min']:.0f}</td>"
-                f"<td style='{td}{net_c}'>{net_s}</td>"
-                f"<td style='{td}{ortg_c}'>{row['Off Rtg']}</td>"
-                f"<td style='{td}{ts_c}'>{row['TS%']}%</td>"
-                f"<td style='{td}{tp_c}'>{row['3P%']}%</td>"
-                f"<td style='{td}{tov_c}'>{row['TOV%']}%</td>"
-                f"<td style='{td}{drtg_c}'>{row['Def Rtg']}</td>"
-                f"<td style='{td}{opp_ts_c}'>{row['Opp TS%']}%</td>"
-                f"<td style='{td}{opp_tv_c}'>{row['Opp TOV%']}%</td>"
-                f"<td style='{td}{drb_c}'>{row['DReb%']}%</td>"
-                f"</tr>"
-            )
-
-        st.markdown(
-            f"""<table style='width:100%;border-collapse:collapse;font-family:sans-serif;'>
-            <thead>
-              <tr style='border-bottom:1px solid #e2e8f0;'>
-                <th rowspan='2' style='{th_l}vertical-align:bottom;'>LINEUP</th>
-                <th rowspan='2' style='{th}vertical-align:bottom;'>MIN</th>
-                <th rowspan='2' style='{th}vertical-align:bottom;'>NET</th>
-                {sec_header('— OFFENSE —', 4)}
-                {sec_header('— DEFENSE —', 4)}
-              </tr>
-              <tr style='border-bottom:2px solid #2774AE;'>
-                <th style='{th}'>OFF RTG</th>
-                <th style='{th}'>TS%</th>
-                <th style='{th}'>3P%</th>
-                <th style='{th}'>TOV%</th>
-                <th style='{th}'>DEF RTG</th>
-                <th style='{th}'>OPP TS%</th>
-                <th style='{th}'>OPP TOV%</th>
-                <th style='{th}'>DREB%</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows_html}
-            </tbody>
-            </table>""",
-            unsafe_allow_html=True,
+        st.dataframe(
+            _top_lu,
+            hide_index=True,
+            use_container_width=True,
+            height=430,
+            column_config={
+                "Lineup":    st.column_config.TextColumn("Lineup"),
+                "Min":       st.column_config.NumberColumn("Min", format="%.0f"),
+                "Net":       st.column_config.NumberColumn("Net", format="%+.1f"),
+                "Off Rtg":   st.column_config.NumberColumn("Off Rtg", format="%.1f"),
+                "TS%":       st.column_config.NumberColumn("TS%", format="%.1f%%"),
+                "3P%":       st.column_config.NumberColumn("3P%", format="%.1f%%"),
+                "TOV%":      st.column_config.NumberColumn("TOV%", format="%.1f%%"),
+                "Def Rtg":   st.column_config.NumberColumn("Def Rtg", format="%.1f"),
+                "Opp TS%":   st.column_config.NumberColumn("Opp TS%", format="%.1f%%"),
+                "Opp TOV%":  st.column_config.NumberColumn("Opp TOV%", format="%.1f%%"),
+                "DReb%":     st.column_config.NumberColumn("DReb%", format="%.1f%%"),
+            },
         )
 
     st.divider()
@@ -2457,1012 +2406,1131 @@ div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-
 
 
 # ==========================================
+# TAB: HOME
+# ==========================================
+
+# Tab index map — must match the st.tabs order (0=Home, so cards start at 1)
+_TAB_INDEX = {
+    "Player Card": 1,
+    "Depth Chart": 2,
+    "One Pager": 3,
+    "Portal Discovery Engine": 4,
+    "Front Office Target Board": 5,
+    "Big Board Print View": 6,
+    "Synergy Play Types": 7,
+}
+
+_HOME_CARDS = [
+    {
+        "title": "Player Card",
+        "desc": "Full individual profile — advanced stats, shot chart, percentile bars, and comp finder.",
+        "img": "static/card_player.jpg",
+    },
+    {
+        "title": "Portal Discovery Engine",
+        "desc": "Search and filter transfer portal targets by position, metrics, and fit.",
+        "img": "static/card_portal.jpg",
+    },
+    {
+        "title": "Depth Chart",
+        "desc": "Team depth by position with BartTorvik advanced metrics and eligibility status.",
+        "img": "static/card_depth.jpg",
+    },
+    {
+        "title": "Synergy Play Types",
+        "desc": "PnR, isolation, spot-up, and 6 more play type breakdowns with position-group percentiles.",
+        "img": "static/card_synergy.jpg",
+    },
+    {
+        "title": "One Pager",
+        "desc": "Printable one-page player summary for coaching staff and recruiting meetings.",
+        "img": "static/card_onepager.jpg",
+    },
+    {
+        "title": "Front Office Target Board",
+        "desc": "Priority-tiered recruiting board with NIL valuations, roles, and scouting notes.",
+        "img": "static/card_targetboard.jpg",
+    },
+]
+
+# If a card was clicked last run, inject JS to switch to that tab index
+_nav_to = st.query_params.get("nav")
+if _nav_to is not None:
+    try:
+        _nav_idx = int(_nav_to)
+        st.components.v1.html(f"""
+<script>
+(function() {{
+    function clickTab() {{
+        var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+        if (tabs.length > {_nav_idx}) {{
+            tabs[{_nav_idx}].click();
+            var url = new URL(window.parent.location.href);
+            url.searchParams.delete('nav');
+            window.parent.history.replaceState(null, '', url.toString());
+        }} else {{
+            setTimeout(clickTab, 100);
+        }}
+    }}
+    setTimeout(clickTab, 200);
+}})();
+</script>
+""", height=0)
+    except (ValueError, TypeError):
+        pass
+
+with tab_home:
+    import os, base64
+
+    def _b64_img(path):
+        if not os.path.exists(path):
+            return None
+        ext = path.rsplit(".", 1)[-1].lower()
+        mime = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
+        b64 = base64.b64encode(open(path,"rb").read()).decode()
+        return f"data:{mime};base64,{b64}"
+
+    # Build card data with base64 images so the iframe can render them
+    _card_data = []
+    for card in _HOME_CARDS:
+        _card_data.append({
+            "title": card["title"],
+            "desc":  card["desc"],
+            "img":   _b64_img(card["img"]),
+            "tab":   _TAB_INDEX[card["title"]],
+        })
+
+    # Hidden Streamlit buttons — one per card, triggered by JS card clicks
+    # CSS injected into parent to hide them
+
+    # Build the full card grid as a single HTML component
+    import json as _json
+    _cards_json = _json.dumps(_card_data)
+    components.html(f"""
+<style>
+  body {{ margin:0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:transparent; }}
+  .grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:20px; padding:4px 2px 16px; }}
+  .card {{
+    border-radius:12px; overflow:hidden; border:1.5px solid #e2e8f0;
+    background:#fff; cursor:pointer;
+    transition: box-shadow 0.18s, transform 0.18s, border-color 0.18s;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }}
+  .card:hover {{
+    box-shadow: 0 8px 28px rgba(39,116,174,0.22);
+    transform: translateY(-3px);
+    border-color: #2774AE;
+  }}
+  .card img {{ width:100%; height:210px; object-fit:cover; display:block; }}
+  .placeholder {{
+    width:100%; height:210px;
+    background: linear-gradient(135deg,#2774AE 0%,#1a5c8a 100%);
+    display:flex; align-items:center; justify-content:center;
+    color:rgba(255,255,255,0.18); font-size:1.8rem; font-weight:900;
+  }}
+  .body {{ padding:13px 15px 15px; }}
+  .title {{ font-size:1.05rem; font-weight:800; color:#2774AE; margin-bottom:4px; }}
+  .desc  {{ font-size:0.80rem; color:#475569; line-height:1.4; }}
+</style>
+<div class="grid" id="grid"></div>
+<script>
+var cards = {_cards_json};
+var grid  = document.getElementById('grid');
+cards.forEach(function(c, i) {{
+  var el = document.createElement('div');
+  el.className = 'card';
+  var imgStyle = (c.tab === 'Depth Chart') ? "object-fit:contain;background:#2774AE;" : "";
+  el.innerHTML =
+    (c.img
+      ? "<img src='" + c.img + "' style='" + imgStyle + "'>"
+      : "<div class='placeholder'>UCLA</div>") +
+    "<div class='body'>" +
+      "<div class='title'>" + c.title + "</div>" +
+      "<div class='desc'>"  + c.desc  + "</div>" +
+    "</div>";
+  el.addEventListener('click', function() {{
+    window.parent.postMessage({{type: 'nav_click', tab: c.tab}}, '*');
+  }});
+  grid.appendChild(el);
+}});
+</script>
+""", height=690, scrolling=False)
+
+
+# ==========================================
 # TAB: PLAYER CARD (Individual Profile + Advanced Card + Target Board link-up)
 # ==========================================
 with tab_card:
     st.subheader("Player Card")
 
-    # Two-way sync between this dropdown and active_player (set by Depth Chart, Portal
-    # Discovery, Target Board, etc). A widget's key can't be reassigned after it's
-    # instantiated, so external changes must be applied before creating the selectbox —
-    # but we can only tell "external change" apart from "user touched this dropdown" by
-    # tracking what active_player was the last time *this* tab synced it.
-    if st.session_state.active_player != st.session_state.get("_last_synced_active_player"):
-        st.session_state["card_player_select"] = st.session_state.active_player
-
-    selected_dropdown = st.selectbox("Search or select any player:", all_player_names,
-                                     key="card_player_select")
-
-    if selected_dropdown != st.session_state.active_player:
-        st.session_state.active_player = selected_dropdown
-
-    st.session_state["_last_synced_active_player"] = st.session_state.active_player
+    _card_opts = [None] + all_player_names
+    _card_idx = (_card_opts.index(st.session_state.active_player)
+                 if st.session_state.active_player in _card_opts else 0)
+    _card_pick = st.selectbox(
+        "Search player:",
+        _card_opts,
+        index=_card_idx,
+        format_func=lambda x: "" if x is None else x,
+        key="card_player_select",
+        label_visibility="collapsed",
+        placeholder="Type a name...",
+    )
+    if _card_pick:
+        st.session_state.active_player = _card_pick
 
     current_player = st.session_state.active_player
-    p_data = df_all[df_all["PLAYER"] == current_player].iloc[0]
-    # BartTorvik's name for this player doesn't always match our locally-scraped game
-    # logs/shot chart spelling (accents, "Jr." suffixes, periods in initials) — resolve
-    # once here and use this for every game-log/shot-chart lookup below.
-    gl_player = resolve_game_log_name(current_player)
 
-    conn = sqlite3.connect('scouting_hub.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT scout_name, priority_tier, position, role, rumored_nil, personal_val, agent, agency, "
-        "photo_url, eval_date, notes, value_tag FROM player_notes WHERE player_name = ?",
-        (current_player,))
-    db_row = cursor.fetchone()
+    if current_player is None:
+        st.markdown(
+            "<div style='text-align:center;padding:80px 0;color:#94a3b8;font-size:1.1rem'>"
+            "Search for a player above to view their card."
+            "</div>",
+            unsafe_allow_html=True
+        )
+    if current_player is not None:
+        p_data = df_all[df_all["PLAYER"] == current_player].iloc[0]
 
-    saved_scout     = db_row[0] if db_row and db_row[0] else "Trey Doty"
-    saved_tier      = db_row[1] if db_row and db_row[1] else "Mid Priority"
-    saved_pos       = db_row[2] if db_row and db_row[2] else "PG"
-    saved_role      = db_row[3] if db_row else ""
-    saved_nil       = db_row[4] if db_row else ""
-    saved_val       = db_row[5] if db_row else ""
-    saved_agent     = db_row[6] if db_row else ""
-    saved_agency    = db_row[7] if db_row else ""
-    saved_photo     = db_row[8] if db_row else ""
-    saved_date      = db_row[9] if db_row else "No previous evaluations logged"
-    saved_notes     = db_row[10] if db_row else ""
-    saved_value_tag = db_row[11] if db_row and db_row[11] else "Properly Valued"
+        conn = sqlite3.connect('scouting_hub.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT scout_name, priority_tier, position, role, rumored_nil, personal_val, agent, agency, "
+            "photo_url, eval_date, notes, value_tag FROM player_notes WHERE player_name = ?",
+            (current_player,))
+        db_row = cursor.fetchone()
 
-    if not saved_photo:
+        saved_scout     = db_row[0] if db_row and db_row[0] else "Trey Doty"
+        saved_tier      = db_row[1] if db_row and db_row[1] else "Mid Priority"
+        saved_pos       = db_row[2] if db_row and db_row[2] else "PG"
+        saved_role      = db_row[3] if db_row else ""
+        saved_nil       = db_row[4] if db_row else ""
+        saved_val       = db_row[5] if db_row else ""
+        saved_agent     = db_row[6] if db_row else ""
+        saved_agency    = db_row[7] if db_row else ""
+        saved_photo     = db_row[8] if db_row else ""
+        saved_date      = db_row[9] if db_row else "No previous evaluations logged"
+        saved_notes     = db_row[10] if db_row else ""
+        saved_value_tag = db_row[11] if db_row and db_row[11] else "Properly Valued"
+
+        if not saved_photo:
+            _tid = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
+            saved_photo = fetch_espn_headshot(current_player, _tid)
+            if db_row and saved_photo:
+                cursor.execute("UPDATE player_notes SET photo_url = ? WHERE player_name = ?", (saved_photo, current_player))
+                conn.commit()
+
+        conn.close()
+
+        TIER_OPTIONS = ["High Priority", "Mid Priority", "Low Priority"]
+        VALUE_TAG_OPTIONS = ["Undervalued", "Properly Valued", "Overvalued"]
+
+        # Advance class year: data is 2025-26, we're building for 2026-27
+        _class_advance = {"Fr": "So", "So": "Jr", "Jr": "Sr", "Sr": "Graduate", "Rs-Fr": "Fr", "Rs-So": "So", "Rs-Jr": "Jr", "Rs-Sr": "Sr"}
+        _raw_class = p_data.get("CLASS", "") if hasattr(p_data, "get") else (p_data["CLASS"] if "CLASS" in p_data.index else "")
+        _display_class = _class_advance.get(str(_raw_class).strip(), str(_raw_class).strip())
+
         _tid = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
-        saved_photo = fetch_espn_headshot(current_player, _tid)
-        if db_row and saved_photo:
-            cursor.execute("UPDATE player_notes SET photo_url = ? WHERE player_name = ?", (saved_photo, current_player))
-            conn.commit()
+        if not _tid:
+            try:
+                _gl_conn = sqlite3.connect("scouting_hub.db")
+                _tid_row = _gl_conn.execute(
+                    "SELECT team_espn_id FROM player_game_logs WHERE player_name = ? AND team_espn_id IS NOT NULL LIMIT 1",
+                    (current_player,)
+                ).fetchone()
+                _gl_conn.close()
+                if _tid_row:
+                    _tid = str(_tid_row[0])
+            except Exception:
+                pass
+        _bio = fetch_espn_bio(current_player, _tid)
+        _weight = _bio.get("weight", "")
+        _position = _bio.get("position", "")
 
-    conn.close()
-
-    TIER_OPTIONS = ["High Priority", "Mid Priority", "Low Priority"]
-    VALUE_TAG_OPTIONS = ["Undervalued", "Properly Valued", "Overvalued"]
-
-    # Advance class year: data is 2025-26, we're building for 2026-27
-    _class_advance = {"Fr": "So", "So": "Jr", "Jr": "Sr", "Sr": "Graduate", "Rs-Fr": "Fr", "Rs-So": "So", "Rs-Jr": "Jr", "Rs-Sr": "Sr"}
-    _raw_class = p_data.get("CLASS", "") if hasattr(p_data, "get") else (p_data["CLASS"] if "CLASS" in p_data.index else "")
-    _display_class = _class_advance.get(str(_raw_class).strip(), str(_raw_class).strip())
-
-    _tid = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
-    if not _tid:
+        # KenPom SOS rank for the player's team
+        _sos_rank = None
         try:
-            _gl_conn = sqlite3.connect("scouting_hub.db")
-            _tid_row = _gl_conn.execute(
-                "SELECT team_espn_id FROM player_game_logs WHERE player_name = ? AND team_espn_id IS NOT NULL LIMIT 1",
-                (gl_player,)
+            _kp_conn = sqlite3.connect("scouting_hub.db")
+            _sos_row = _kp_conn.execute(
+                "SELECT sos_rank FROM kenpom_sos WHERE kp_team = ?", (p_data["TEAM"],)
             ).fetchone()
-            _gl_conn.close()
-            if _tid_row:
-                _tid = str(_tid_row[0])
+            _kp_conn.close()
+            if _sos_row:
+                _sos_rank = _sos_row[0]
         except Exception:
             pass
-    _bio = fetch_espn_bio(current_player, _tid)
-    _weight = _bio.get("weight", "")
-    _position = _bio.get("position", "")
 
-    # KenPom SOS rank for the player's team
-    _sos_rank = None
-    try:
-        _kp_conn = sqlite3.connect("scouting_hub.db")
-        _sos_row = _kp_conn.execute(
-            "SELECT sos_rank FROM kenpom_sos WHERE kp_team = ?", (p_data["TEAM"],)
-        ).fetchone()
-        _kp_conn.close()
-        if _sos_row:
-            _sos_rank = _sos_row[0]
-    except Exception:
-        pass
+        _conf_names = {
+            "A10": "Atlantic 10", "ACC": "ACC", "AE": "America East", "ASun": "ASUN",
+            "Amer": "American Athletic", "B10": "Big Ten", "B12": "Big 12", "BE": "Big East",
+            "BSky": "Big Sky", "BSth": "Big South", "BW": "Big West", "CAA": "CAA",
+            "CUSA": "Conference USA", "Horz": "Horizon League", "Ivy": "Ivy League",
+            "MAAC": "MAAC", "MAC": "MAC", "MEAC": "MEAC", "MVC": "Missouri Valley",
+            "MWC": "Mountain West", "NEC": "NEC", "OVC": "Ohio Valley", "Pat": "Patriot League",
+            "SB": "Sun Belt", "SC": "Southern Conference", "SEC": "SEC", "SWAC": "SWAC",
+            "Slnd": "Southland", "Sum": "Summit League", "WAC": "WAC", "WCC": "West Coast",
+        }
+        _conf_display = _conf_names.get(str(p_data["CONF"]), str(p_data["CONF"]))
 
-    _conf_names = {
-        "A10": "Atlantic 10", "ACC": "ACC", "AE": "America East", "ASun": "ASUN",
-        "Amer": "American Athletic", "B10": "Big Ten", "B12": "Big 12", "BE": "Big East",
-        "BSky": "Big Sky", "BSth": "Big South", "BW": "Big West", "CAA": "CAA",
-        "CUSA": "Conference USA", "Horz": "Horizon League", "Ivy": "Ivy League",
-        "MAAC": "MAAC", "MAC": "MAC", "MEAC": "MEAC", "MVC": "Missouri Valley",
-        "MWC": "Mountain West", "NEC": "NEC", "OVC": "Ohio Valley", "Pat": "Patriot League",
-        "SB": "Sun Belt", "SC": "Southern Conference", "SEC": "SEC", "SWAC": "SWAC",
-        "Slnd": "Southland", "Sum": "Summit League", "WAC": "WAC", "WCC": "West Coast",
-    }
-    _conf_display = _conf_names.get(str(p_data["CONF"]), str(p_data["CONF"]))
+        # Pull boxscore stats for header + stat grid
+        _hdr_box = load_consistent_boxscore_stats()
+        _hdr_row = _hdr_box[_hdr_box["PLAYER"] == current_player]
+        if len(_hdr_row) > 1:
+            _team_match = _hdr_row[_hdr_row["TEAM"].str.contains(str(p_data["TEAM"]), case=False, na=False)]
+            if not _team_match.empty:
+                _hdr_row = _team_match
+        _hdr = _hdr_row.iloc[0] if not _hdr_row.empty else None
 
-    # Pull boxscore stats for header + stat grid
-    _hdr_box = load_consistent_boxscore_stats()
-    _hdr_row = _hdr_box[_hdr_box["PLAYER"] == gl_player]
-    if len(_hdr_row) > 1:
-        _team_match = _hdr_row[_hdr_row["TEAM"].str.contains(str(p_data["TEAM"]), case=False, na=False)]
-        if not _team_match.empty:
-            _hdr_row = _team_match
-    _hdr = _hdr_row.iloc[0] if not _hdr_row.empty else None
+        # Position-filtered benchmarks (Guard/Wing/Big)
+        _pos_benchmarks = build_position_benchmarks(df_all, _hdr_box)
 
-    # Position-filtered benchmarks (Guard/Wing/Big)
-    _pos_benchmarks = build_position_benchmarks(df_all, _hdr_box)
-
-    # Determine position group for this player
-    _player_pos_group = "Guard"  # default
-    try:
-        _pg_conn = sqlite3.connect("scouting_hub.db")
-        _pg_row = _pg_conn.execute(
-            "SELECT position_group FROM player_positions WHERE player_name = ?", (current_player,)
-        ).fetchone()
-        _pg_conn.close()
-        if _pg_row:
-            _player_pos_group = _pg_row[0]
-        elif _position:
-            # Fall back to ESPN bio position
-            _pos_lower = _position.lower()
-            if any(w in _pos_lower for w in ("center", "big")):
-                _player_pos_group = "Big"
-            elif any(w in _pos_lower for w in ("forward",)):
-                _player_pos_group = "Wing"
-            else:
-                _player_pos_group = "Guard"
-    except Exception:
-        pass
-
-    _active_bm = _pos_benchmarks.get(_player_pos_group, {})
-    _BOX_LOWER = {"TOV_PCT"}
-    _BT_LOWER  = {"TO"}
-
-    def _fmt(val, dec=1):
+        # Determine position group for this player
+        _player_pos_group = "Guard"  # default
         try:
-            return f"{float(val):.{dec}f}" if val is not None and str(val) not in ("", "nan", "None") else "—"
+            _pg_conn = sqlite3.connect("scouting_hub.db")
+            _pg_row = _pg_conn.execute(
+                "SELECT position_group FROM player_positions WHERE player_name = ?", (current_player,)
+            ).fetchone()
+            _pg_conn.close()
+            if _pg_row:
+                _player_pos_group = _pg_row[0]
+            elif _position:
+                # Fall back to ESPN bio position
+                _pos_lower = _position.lower()
+                if any(w in _pos_lower for w in ("center", "big")):
+                    _player_pos_group = "Big"
+                elif any(w in _pos_lower for w in ("forward",)):
+                    _player_pos_group = "Wing"
+                else:
+                    _player_pos_group = "Guard"
         except Exception:
-            return "—"
+            pass
 
-    def _box_pct(col, val):
-        vals = _active_bm.get(col)
-        if not vals or val is None:
-            return None
-        try:
-            v = float(val)
-            if math.isnan(v):
+        _active_bm = _pos_benchmarks.get(_player_pos_group, {})
+        _BOX_LOWER = {"TOV_PCT"}
+        _BT_LOWER  = {"TO"}
+
+        def _fmt(val, dec=1):
+            try:
+                return f"{float(val):.{dec}f}" if val is not None and str(val) not in ("", "nan", "None") else "—"
+            except Exception:
+                return "—"
+
+        def _box_pct(col, val):
+            vals = _active_bm.get(col)
+            if not vals or val is None:
                 return None
-        except Exception:
-            return None
-        p = get_pct(v, vals)
-        return (100 - p) if col in _BOX_LOWER else p
+            try:
+                v = float(val)
+                if math.isnan(v):
+                    return None
+            except Exception:
+                return None
+            p = get_pct(v, vals)
+            return (100 - p) if col in _BOX_LOWER else p
 
-    def _chip(label, val, pct, suffix="", dec=1):
-        bg, fg = pct_color(pct)
-        disp = _fmt(val, dec)
-        if disp == "—":
-            bg, fg = "#EAECF0", "#1A1A1A"
-        val_str = f"{disp}{suffix}" if disp != "—" else "—"
-        return (
-            f"<div style='background:{bg};color:{fg};border-radius:6px;padding:5px 8px;"
-            f"display:flex;flex-direction:column;min-width:70px'>"
-            f"<span style='font-size:0.68rem;opacity:0.75'>{label}</span>"
-            f"<span style='font-size:0.95rem;font-weight:700'>{val_str}</span>"
-            f"</div>"
-        )
-
-    def _stat_row_colored(label, val, pct, suffix="", dec=1):
-        bg, bubble_fg = pct_color(pct)
-        disp    = _fmt(val, dec)
-        val_str = f"{disp}{suffix}" if disp != "—" else "—"
-        if pct is not None:
-            fill_w  = f"{pct:.1f}%"
-            pct_num = f"{pct:.0f}"
-            bubble = (
-                f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);background:{bg};"
-                f"color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;width:20px;height:20px;"
-                f"display:flex;align-items:center;justify-content:center;z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{pct_num}</div>"
+        def _chip(label, val, pct, suffix="", dec=1):
+            bg, fg = pct_color(pct)
+            disp = _fmt(val, dec)
+            if disp == "—":
+                bg, fg = "#EAECF0", "#1A1A1A"
+            val_str = f"{disp}{suffix}" if disp != "—" else "—"
+            return (
+                f"<div style='background:{bg};color:{fg};border-radius:6px;padding:5px 8px;"
+                f"display:flex;flex-direction:column;min-width:70px'>"
+                f"<span style='font-size:0.68rem;opacity:0.75'>{label}</span>"
+                f"<span style='font-size:0.95rem;font-weight:700'>{val_str}</span>"
+                f"</div>"
             )
-            fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
-        else:
-            fill   = ""
-            bubble = ""
-        return (
-            f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
-            f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:72px;text-align:right;flex-shrink:0'>{label}</span>"
-            f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
-            f"{fill}{bubble}"
-            f"</div>"
-            f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
-            f"</div>"
+
+        def _stat_row_colored(label, val, pct, suffix="", dec=1):
+            bg, bubble_fg = pct_color(pct)
+            disp    = _fmt(val, dec)
+            val_str = f"{disp}{suffix}" if disp != "—" else "—"
+            if pct is not None:
+                fill_w  = f"{pct:.1f}%"
+                pct_num = f"{pct:.0f}"
+                bubble = (
+                    f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);background:{bg};"
+                    f"color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;width:20px;height:20px;"
+                    f"display:flex;align-items:center;justify-content:center;z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{pct_num}</div>"
+                )
+                fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
+            else:
+                fill   = ""
+                bubble = ""
+            return (
+                f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
+                f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:72px;text-align:right;flex-shrink:0'>{label}</span>"
+                f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
+                f"{fill}{bubble}"
+                f"</div>"
+                f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
+                f"</div>"
+            )
+
+        def _cat_table(title, rows_html):
+            return (
+                f"<div style='margin-bottom:20px'>"
+                f"<div style='font-size:1.05rem;font-weight:900;text-transform:uppercase;"
+                f"letter-spacing:0.08em;margin-bottom:8px;color:#111;"
+                f"border-bottom:2px solid #ddd;padding-bottom:4px'>{title}</div>"
+                f"{''.join(rows_html)}"
+                f"</div>"
+            )
+
+        col_img, col_info = st.columns([1, 4])
+        with col_img:
+            if saved_photo:
+                st.image(saved_photo, use_container_width=True)
+            else:
+                st.info("No headshot logged")
+
+        with col_info:
+            st.markdown(f"## {current_player}")
+            _sos_str = f"&nbsp;&nbsp;·&nbsp;&nbsp;SOS: #{_sos_rank}" if _sos_rank else ""
+            st.markdown(f"**{p_data['TEAM']}** &nbsp;·&nbsp; {_conf_display}{_sos_str}")
+            bio_parts = []
+            if p_data["HEIGHT"]:
+                bio_parts.append(p_data["HEIGHT"])
+            if _weight:
+                bio_parts.append(_weight)
+            if _position:
+                bio_parts.append(_position)
+            if _display_class:
+                bio_parts.append(_display_class)
+            st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
+            st.caption(f"Last evaluation: {saved_date}")
+
+        # Basic box score, right below the header — Season plus Conference/Non-Conference splits.
+        if _hdr is not None:
+            def _row_num(v, d=1):
+                try:
+                    return f"{float(v):.{d}f}"
+                except (TypeError, ValueError):
+                    return "—"
+
+            def _row_pct(v):
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    return "—"
+                return f"{v:.1f}%" if v else "—"
+
+            def _stats_table_row(row_label, r):
+                if r is None:
+                    return f"<tr><td>{row_label}</td>" + "<td>—</td>" * 16 + "</tr>"
+                return (
+                    f"<tr><td style='font-weight:600'>{row_label}</td>"
+                    f"<td>{_row_num(r.get('GP'), 0)}</td>"
+                    f"<td>{_row_num(r.get('MPG'))}</td>"
+                    f"<td>{_row_num(r.get('PPG'))}</td>"
+                    f"<td>{_row_num(r.get('RPG'))}</td>"
+                    f"<td>{_row_num(r.get('APG'))}</td>"
+                    f"<td>{_row_num(r.get('SPG'))}</td>"
+                    f"<td>{_row_num(r.get('BPG'))}</td>"
+                    f"<td>{_row_pct(r.get('FG_PCT'))}</td>"
+                    f"<td>{_row_pct(r.get('EFG'))}</td>"
+                    f"<td>{_row_pct(r.get('TS'))}</td>"
+                    f"<td>{_row_pct(r.get('TWO_P'))}</td>"
+                    f"<td>{_row_pct(r.get('THREE_P'))}</td>"
+                    f"<td>{_row_pct(r.get('USG'))}</td>"
+                    f"<td>{_row_pct(r.get('AST_PCT'))}</td>"
+                    f"<td>{_row_pct(r.get('OR_PCT'))}</td>"
+                    f"<td>{_row_pct(r.get('DR_PCT'))}</td>"
+                    "</tr>"
+                )
+
+            _conf_map = build_team_conf_map(df_all)
+            _own_conf = p_data["CONF"]
+            _in_conf_ids = tuple(sorted(eid for eid, c in _conf_map.items() if c == _own_conf))
+
+            _conf_row = _non_conf_row = None
+            if _in_conf_ids:
+                _conf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids)
+                _cr = _conf_box[_conf_box["PLAYER"] == current_player]
+                _conf_row = _cr.iloc[0] if not _cr.empty else None
+
+                _nonconf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids, exclude_conf_ids=True)
+                _ncr = _nonconf_box[_nonconf_box["PLAYER"] == current_player]
+                _non_conf_row = _ncr.iloc[0] if not _ncr.empty else None
+
+            _top100_box = load_consistent_boxscore_stats(max_opp_rank=100)
+            _t100r = _top100_box[_top100_box["PLAYER"] == current_player]
+            _top100_row = _t100r.iloc[0] if not _t100r.empty else None
+
+            _top50_box = load_consistent_boxscore_stats(max_opp_rank=50)
+            _t50r = _top50_box[_top50_box["PLAYER"] == current_player]
+            _top50_row = _t50r.iloc[0] if not _t50r.empty else None
+
+            _stats_rows_html = _stats_table_row("Season", _hdr)
+            if _conf_row is not None or _non_conf_row is not None:
+                _stats_rows_html += _stats_table_row("Conference", _conf_row)
+                _stats_rows_html += _stats_table_row("Non-Conf", _non_conf_row)
+            _stats_rows_html += _stats_table_row("vs Top 100", _top100_row)
+            _stats_rows_html += _stats_table_row("vs Top 50", _top50_row)
+
+            st.markdown(
+                "<style>.card-stats-table{width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:8px;}"
+                ".card-stats-table th{text-align:center;padding:4px 6px;color:#6b7280;font-size:0.72rem;"
+                "text-transform:uppercase;border-bottom:2px solid #e5e7eb;}"
+                ".card-stats-table td{text-align:center;padding:5px 6px;border-bottom:1px solid #f0f0f0;}</style>"
+                "<table class='card-stats-table'><thead><tr>"
+                "<th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>"
+                "<th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>"
+                "<th>AST%</th><th>OR%</th><th>DR%</th>"
+                "</tr></thead><tbody>" + _stats_rows_html + "</tbody></table>",
+                unsafe_allow_html=True,
+            )
+            if _conf_row is None and _non_conf_row is None:
+                st.caption("Conference/Non-Conference split unavailable — couldn't match this team's conference to game log opponents.")
+
+        st.divider()
+
+        # ── Bucketed stat categories ──────────────────────────────────────────
+        card_benchmarks = build_national_benchmarks(df_all)
+        if _hdr is not None:
+            _bt = p_data  # BartTorvik row for PRPG/BPM/OBPM/DBPM/ORTG/THREE_P_100
+
+            def _bt_pct(col, val):
+                # Use position-filtered benchmarks; fall back to national
+                vals = _active_bm.get(col)
+                if vals:
+                    if not val or (isinstance(val, float) and math.isnan(val)):
+                        return None
+                    try:
+                        p = get_pct(float(val), vals)
+                        return (100 - p) if col in _BT_LOWER else p
+                    except Exception:
+                        return None
+                return national_pct(col, val, card_benchmarks)
+
+            eff_html = _cat_table("Efficiency", [
+                _stat_row_colored("ORTG",  _bt.get("ORTG"),  _bt_pct("ORTG",  _bt.get("ORTG"))),
+                _stat_row_colored("USG%",  _hdr.get("USG"),  _box_pct("USG",  _hdr.get("USG")),  "%"),
+                _stat_row_colored("TS%",   _hdr.get("TS"),   _box_pct("TS",   _hdr.get("TS")),   "%"),
+                _stat_row_colored("EFG%",  _hdr.get("EFG"),  _box_pct("EFG",  _hdr.get("EFG")),  "%"),
+            ])
+
+            imp_html = _cat_table("Impact", [
+                _stat_row_colored("PRPG",  _bt.get("PRPG"),  _bt_pct("PRPG",  _bt.get("PRPG"))),
+                _stat_row_colored("BPM",   _bt.get("BPM"),   _bt_pct("BPM",   _bt.get("BPM"))),
+                _stat_row_colored("OBPM",  _bt.get("OBPM"),  _bt_pct("OBPM",  _bt.get("OBPM"))),
+                _stat_row_colored("DBPM",  _bt.get("DBPM"),  _bt_pct("DBPM",  _bt.get("DBPM"))),
+                _stat_row_colored("MIN%",  _bt.get("MIN_PCT"), _bt_pct("MIN_PCT", _bt.get("MIN_PCT")), "%"),
+            ])
+
+            play_html = _cat_table("Playmaking", [
+                _stat_row_colored("AST%",   _hdr.get("AST_PCT"), _box_pct("AST_PCT", _hdr.get("AST_PCT")), "%"),
+                _stat_row_colored("TOV%",   _hdr.get("TOV_PCT"), _box_pct("TOV_PCT", _hdr.get("TOV_PCT")), "%"),
+                _stat_row_colored("AST/TO", _hdr.get("AST_TO"),  _box_pct("AST_TO",  _hdr.get("AST_TO")),  "", 2),
+                _stat_row_colored("USG%",   _hdr.get("USG"),     _box_pct("USG",     _hdr.get("USG")),     "%"),
+            ])
+
+            shoot_html = _cat_table("Shooting", [
+                _stat_row_colored("TS%",     _hdr.get("TS"),       _box_pct("TS",      _hdr.get("TS")),      "%"),
+                _stat_row_colored("2P%",     _hdr.get("TWO_P"),    _box_pct("TWO_P",   _hdr.get("TWO_P")),   "%"),
+                _stat_row_colored("3P%",     _hdr.get("THREE_P"),  _box_pct("THREE_P", _hdr.get("THREE_P")), "%"),
+                _stat_row_colored("3P Rate", _bt.get("THREE_P_100"), _bt_pct("THREE_P_100", _bt.get("THREE_P_100")), " /100"),
+                _stat_row_colored("FT%",     _hdr.get("FT_PCT"),   _box_pct("FT_PCT",  _hdr.get("FT_PCT")),  "%"),
+                _stat_row_colored("FTR",     _hdr.get("FTR"),      _box_pct("FTR",     _hdr.get("FTR")),     "%"),
+            ])
+
+            reb_html = _cat_table("Rebounding", [
+                _stat_row_colored("OREB%", _hdr.get("OR_PCT"), _box_pct("OR_PCT", _hdr.get("OR_PCT")), "%"),
+                _stat_row_colored("DREB%", _hdr.get("DR_PCT"), _box_pct("DR_PCT", _hdr.get("DR_PCT")), "%"),
+                _stat_row_colored("RPG",   _hdr.get("RPG"),    _box_pct("RPG",    _hdr.get("RPG"))),
+            ])
+
+            def_html = _cat_table("Defense", [
+                _stat_row_colored("STL%",  _hdr.get("STL_PCT"), _box_pct("STL_PCT", _hdr.get("STL_PCT")), "%"),
+                _stat_row_colored("BLK%",  _hdr.get("BLK_PCT"), _box_pct("BLK_PCT", _hdr.get("BLK_PCT")), "%"),
+                _stat_row_colored("DBPM",  _bt.get("DBPM"),     _bt_pct("DBPM",     _bt.get("DBPM"))),
+                _stat_row_colored("SPG",   _hdr.get("SPG"),     _box_pct("SPG",     _hdr.get("SPG"))),
+                _stat_row_colored("BPG",   _hdr.get("BPG"),     _box_pct("BPG",     _hdr.get("BPG"))),
+            ])
+
+            st.caption(f"Percentiles vs. P5 {_player_pos_group}s")
+            col_left, col_right = st.columns(2)
+            with col_left:
+                st.markdown(eff_html + shoot_html + play_html, unsafe_allow_html=True)
+            with col_right:
+                st.markdown(imp_html + reb_html + def_html, unsafe_allow_html=True)
+
+        curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
+
+        st.write("**Competition Split**")
+
+        _split = st.radio(
+            "Competition split",
+            ["All Games", "Top 100", "Top 50"],
+            horizontal=True,
+            key="profile_split",
+            label_visibility="collapsed",
         )
 
-    def _cat_table(title, rows_html):
-        return (
-            f"<div style='margin-bottom:20px'>"
-            f"<div style='font-size:1.05rem;font-weight:900;text-transform:uppercase;"
-            f"letter-spacing:0.08em;margin-bottom:8px;color:#111;"
-            f"border-bottom:2px solid #ddd;padding-bottom:4px'>{title}</div>"
-            f"{''.join(rows_html)}"
-            f"</div>"
-        )
+        _max_rank = None if _split == "All Games" else (100 if _split == "Top 100" else 50)
 
-    col_img, col_info = st.columns([1, 4])
-    with col_img:
-        if saved_photo:
-            st.image(saved_photo, use_container_width=True)
+        if not _gl_ready:
+            st.info("Run `python3 build_game_logs.py` to enable the shot chart.")
         else:
-            st.info("No headshot logged")
+            _box_df = load_consistent_boxscore_stats(_max_rank)
+            _pbox = _box_df[_box_df["PLAYER"] == current_player]
+            if len(_pbox) > 1:
+                _bt_team = p_data["TEAM"]
+                _team_match = _pbox[_pbox["TEAM"].str.contains(_bt_team, case=False, na=False)]
+                if not _team_match.empty:
+                    _pbox = _team_match
 
-    with col_info:
-        st.markdown(f"## {current_player}")
-        _sos_str = f"&nbsp;&nbsp;·&nbsp;&nbsp;SOS: #{_sos_rank}" if _sos_rank else ""
-        st.markdown(f"**{p_data['TEAM']}** &nbsp;·&nbsp; {_conf_display}{_sos_str}")
-        bio_parts = []
-        if p_data["HEIGHT"]:
-            bio_parts.append(p_data["HEIGHT"])
-        if _weight:
-            bio_parts.append(_weight)
-        if _position:
-            bio_parts.append(_position)
-        if _display_class:
-            bio_parts.append(_display_class)
-        st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
-        st.caption(f"Last evaluation: {saved_date}")
+            # Shot chart section — use matched team_espn_id to avoid name collisions
+            _team_id = _pbox.iloc[0]["team_espn_id"] if not _pbox.empty and "team_espn_id" in _pbox.columns else None
+            _shots = load_player_shots(current_player, _team_id)
+            if not _shots.empty:
+                st.write("**Shot Chart**")
+                _chart_title = f"{current_player}  ·  {_split}"
+                _fig = draw_shot_chart(_shots, title=_chart_title)
+                col_chart, col_gap = st.columns([3, 2])
+                with col_chart:
+                    st.pyplot(_fig, use_container_width=True)
+                plt.close(_fig)
 
-    # Basic box score, right below the header — Season plus Conference/Non-Conference splits.
-    if _hdr is not None:
-        def _row_num(v, d=1):
+        st.divider()
+
+        with st.expander(f"Find Comps: {current_player}", expanded=False):
+            if curated_player:
+                if curated_player.get("writeup"):
+                    st.write(curated_player["writeup"])
+                st.write(f"**Projection:** {curated_player.get('projection', '')}  ·  "
+                         f"**Role:** {curated_player.get('role', '')}")
+                st.divider()
+
+            if df_all is None or df_all.empty:
+                st.warning("BartTorvik data unavailable.")
+            else:
+                comp_bucket_options = ["Guard", "Wing", "Big"]
+                auto_bucket = POS_TAG_BUCKET.get(p_data.get("POS_TAG", ""), "Wing")
+                cc1, cc2 = st.columns([1, 2])
+                with cc1:
+                    comp_n = st.slider("Comps to show:", 3, 15, 8, key="comp_n_slider")
+                with cc2:
+                    comp_bucket = st.radio("Position group for weighting:", comp_bucket_options,
+                                           index=comp_bucket_options.index(auto_bucket),
+                                           horizontal=True, key="comp_bucket_radio")
+
+                top_matches, dominant_cat = find_stat_comps(
+                    current_player, df_all, card_benchmarks, n=comp_n, bucket_override=comp_bucket
+                )
+
+                boost_note = f" boosted toward this player's real-stat strength: **{dominant_cat}**" if dominant_cat else ""
+                st.write(f"**Top {len(top_matches)} comps from {len(df_all):,} current-season players** "
+                         f"— height ±5in, weighted by **{comp_bucket}** profile{boost_note}, "
+                         f"real KenPom team strength nudges the ranking, shot-selection profile and "
+                         f"zone FG% (rim/mid/three) also weighted in where shot-chart data exists.")
+
+                def _zone_fmt(freq, eff):
+                    eff_txt = f"{eff:.0f}% FG" if pd.notna(eff) else "no FG% sample"
+                    return f"{freq:.0f}% ({eff_txt})"
+
+                _zone_df = merge_shot_zones(df_all)
+                _target_zone_row = _zone_df[_zone_df["PLAYER"] == current_player]
+                if not _target_zone_row.empty and pd.notna(_target_zone_row.iloc[0].get("PCT_RIM")):
+                    tz = _target_zone_row.iloc[0]
+                    st.caption(
+                        f"**{current_player}'s shot profile (share of FGA, zone FG%):** "
+                        f"Rim {_zone_fmt(tz['PCT_RIM'], tz['RIM_FG_PCT'])} · "
+                        f"Mid {_zone_fmt(tz['PCT_MID'], tz['MID_FG_PCT'])} · "
+                        f"Three {_zone_fmt(tz['PCT_THREE'], tz['THREE_FG_PCT'])}"
+                    )
+
+                COMP_STAT_LABELS = {
+                    "ORTG": "ORtg", "AST": "AST%", "TO": "TO%", "STL": "STL%", "MIN_PCT": "Min%",
+                    "THREE_P": "3P%", "TS": "TS%", "BPM": "BPM", "USG": "USG%", "EFG": "eFG%",
+                    "OBPM": "OBPM", "DBPM": "DBPM", "OR": "OR%", "DR": "DR%", "BLK": "BLK%",
+                    "FTR": "FT Rate", "FT_PCT": "FT%", "TWO_P": "2P%", "PRPG": "PRPG",
+                    "AST_TO": "AST/TO", "TEAM_ADJ_EM": "Team AdjEM",
+                    "PCT_RIM": "Rim FGA%", "PCT_MID": "Mid FGA%", "PCT_THREE": "3PT FGA%",
+                    "RIM_FG_PCT": "Rim FG%", "MID_FG_PCT": "Mid FG%", "THREE_FG_PCT": "3PT FG%",
+                }
+
+                def _stat_val(row, stat):
+                    v = row.get(stat)
+                    if v is None or (isinstance(v, float) and math.isnan(v)):
+                        return None
+                    if stat in ("TS", "EFG") and v <= 1.0:
+                        v = v * 100
+                    return float(v)
+
+                def _plain_tile(label, value_str):
+                    return (
+                        "<div style=\"flex:1;padding:6px 4px;text-align:center;border-right:1px solid #e5e7eb;background:#F1F5F9;\">"
+                        "<div style=\"font-size:12px;font-weight:600;color:#0F172A;\">" + value_str + "</div>"
+                        "<div style=\"font-size:7px;color:#64748B;text-transform:uppercase;margin-top:1px;\">" + label + "</div>"
+                        "</div>"
+                    )
+
+                def _pct_tile(label, value, pct, decimals=1, suffix="%"):
+                    bg, fg = pct_color(pct)
+                    pct_txt = f"({pct:.0f}th)" if pct is not None else ""
+                    val_txt = fmt(value, decimals, suffix) if value is not None else "—"
+                    return (
+                        "<div style=\"flex:1;padding:6px 4px;text-align:center;border-right:1px solid #e5e7eb;background:" + bg + ";\">"
+                        "<div style=\"font-size:12px;font-weight:600;color:" + fg + ";\">" + val_txt + "</div>"
+                        "<div style=\"font-size:7px;color:" + fg + ";opacity:.75;text-transform:uppercase;margin-top:1px;\">" + label + "</div>"
+                        "<div style=\"font-size:7px;color:" + fg + ";opacity:.6;\">" + pct_txt + "</div>"
+                        "</div>"
+                    )
+
+                if not top_matches:
+                    st.info("No close height/stat matches found in the current season database.")
+                else:
+                    for _comp_idx, (match_score, match_data) in enumerate(top_matches):
+                        pct = round(match_score * 100, 1)
+                        c_name = str(match_data.get("PLAYER", ""))
+                        c_team = str(match_data.get("TEAM", ""))
+                        c_conf = str(match_data.get("CONF", ""))
+                        c_ht   = str(match_data.get("HEIGHT", ""))
+                        c_class = str(match_data.get("CLASS", "") or "")
+
+                        # Basic box score — plain, no percentile, easy to scan at a glance.
+                        basic_row_html = (
+                            "<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
+                            + _plain_tile("PPG", fmt(_stat_val(match_data, "PPG"), 1))
+                            + _plain_tile("RPG", fmt(_stat_val(match_data, "RPG"), 1))
+                            + _plain_tile("APG", fmt(_stat_val(match_data, "APG"), 1)).replace("border-right:1px solid #e5e7eb;", "")
+                            + "</div>"
+                        )
+
+                        # Advanced stats — percentile-colored, same visual language as the Player Card.
+                        adv_stats = [("TS", "TS%"), ("USG", "USG%"), ("EFG", "eFG%"), ("BPM", "BPM"), ("AST", "AST%")]
+                        adv_html = ""
+                        for i, (stat, label) in enumerate(adv_stats):
+                            v = _stat_val(match_data, stat)
+                            p = national_pct(stat, v, card_benchmarks)
+                            tile = _pct_tile(label, v, p)
+                            if i == len(adv_stats) - 1:
+                                tile = tile.replace("border-right:1px solid #e5e7eb;", "")
+                            adv_html += tile
+                        adv_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
+                                        "overflow:hidden;margin-bottom:6px;\">" + adv_html + "</div>")
+
+                        # "Why matched" callout — the specific stats behind this player's dominant-category
+                        # boost, with real values, so it's clear *why* this is a comp, not just a score.
+                        why_html = ""
+                        if dominant_cat:
+                            cat_stats = COMP_BOOST_STATS.get(dominant_cat, [])
+                            cat_tiles = ""
+                            shown = 0
+                            for stat in cat_stats:
+                                v = _stat_val(match_data, stat)
+                                if v is None:
+                                    continue
+                                p = national_pct(stat, match_data.get(stat), card_benchmarks)
+                                label = COMP_STAT_LABELS.get(stat, stat)
+                                decimals = 2 if stat == "AST_TO" else 1
+                                suffix = "" if stat in ("AST_TO", "BPM", "TEAM_ADJ_EM") else "%"
+                                cat_tiles += _pct_tile(label, v, p, decimals=decimals, suffix=suffix)
+                                shown += 1
+                            if shown:
+                                idx = cat_tiles.rfind("border-right:1px solid #e5e7eb;")
+                                if idx != -1:
+                                    cat_tiles = cat_tiles[:idx] + cat_tiles[idx + len("border-right:1px solid #e5e7eb;"):]
+                                why_html = (
+                                    "<div style=\"margin-bottom:6px;\">"
+                                    "<div style=\"font-size:8px;font-weight:700;color:#92600a;text-transform:uppercase;"
+                                    "letter-spacing:.04em;margin-bottom:4px;\">⭐ Matched on: " + dominant_cat + "</div>"
+                                    "<div style=\"display:flex;border:1px solid #f9d98a;border-radius:5px;overflow:hidden;"
+                                    "background:#fffdf7;\">" + cat_tiles + "</div>"
+                                    "</div>"
+                                )
+
+                        zone_row_html = ""
+                        if pd.notna(match_data.get("PCT_RIM")):
+                            zone_html = (
+                                _pct_tile("Rim FGA", match_data["PCT_RIM"], None, decimals=0)
+                                + _pct_tile("Mid FGA", match_data["PCT_MID"], None, decimals=0)
+                                + _pct_tile("Three FGA", match_data["PCT_THREE"], None, decimals=0).replace("border-right:1px solid #e5e7eb;", "")
+                            )
+                            zone_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
+                                              "overflow:hidden;margin-bottom:6px;\">" + zone_html + "</div>")
+
+                        html = (
+                            "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
+                            "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
+                            "<div>"
+                            "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
+                            "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht
+                            + (" &middot; " + c_class if c_class else "") + " &middot; " + c_team + " (" + c_conf + ")</div>"
+                            "</div>"
+                            "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
+                            "</div>"
+                            + basic_row_html
+                            + adv_row_html
+                            + why_html
+                            + zone_row_html +
+                            "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
+                            "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
+                            "</div>"
+                            "</div>"
+                        )
+                        st.markdown(html, unsafe_allow_html=True)
+                        if st.button(f"↗ Open {c_name}'s Player Card", key=f"comp_open_{current_player}_{_comp_idx}_{c_name}"):
+                            st.session_state.active_player = c_name
+                            st.session_state.go_to_profile = True
+                            st.rerun()
+
+        st.divider()
+
+        st.write("**Detailed Scouting Report**")
+        col_scout, col_pos, col_role = st.columns(3)
+        with col_scout:
+            scout_input = st.text_input("Assigned Staff Member / Scout Name:", value=saved_scout)
+        with col_pos:
+            position_list = ["PG", "CG", "W", "F", "C"]
+            pos_idx = position_list.index(saved_pos) if saved_pos in position_list else 0
+            position_input = st.selectbox("Primary Position Grouping:", position_list, index=pos_idx)
+        with col_role:
+            role_input = st.text_input("Projected Tactical Role Allocation (e.g., Starting Point Guard):", value=saved_role)
+
+        st.write("**🎯 Front Office Target Board**")
+        col_tier, col_valtag = st.columns(2)
+        with col_tier:
+            tier_input = st.selectbox("Priority", TIER_OPTIONS,
+                                      index=TIER_OPTIONS.index(saved_tier) if saved_tier in TIER_OPTIONS else 1)
+        with col_valtag:
+            value_tag_input = st.selectbox("Value Tag", VALUE_TAG_OPTIONS,
+                                           index=VALUE_TAG_OPTIONS.index(saved_value_tag) if saved_value_tag in VALUE_TAG_OPTIONS else 1)
+
+        st.write("**Representation & Personnel Valuation**")
+        col_agent, col_agency, col_nil, col_val = st.columns(4)
+        with col_agent:
+            agent_input = st.text_input("Primary Agent:", value=saved_agent)
+        with col_agency:
+            agency_input = st.text_input("Agency:", value=saved_agency)
+        with col_nil:
+            nil_input = st.text_input("Rumored External NIL:", value=saved_nil)
+        with col_val:
+            val_input = st.text_input("Internal Staff Valuation:", value=saved_val)
+
+        photo_input = st.text_input("Headshot Image Link (Optional manual override):", value=saved_photo)
+        notes_input = st.text_area("Detailed Background Intel, Character Evaluations, and General Notes:",
+                                   value=saved_notes, height=150)
+
+        if st.button("Save Scouting Report"):
+            execution_date = datetime.now().strftime("%Y-%m-%d")
+            _tid2 = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
+            final_photo = photo_input if photo_input else fetch_espn_headshot(current_player, _tid2)
+            conn = sqlite3.connect('scouting_hub.db')
+            cursor = conn.cursor()
+            cursor.execute('''
+                           INSERT INTO player_notes (player_name, team_name, scout_name, priority_tier, position, role,
+                                                     rumored_nil, personal_val, agent, agency, photo_url, eval_date,
+                                                     notes, value_tag)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(player_name) DO
+                           UPDATE SET
+                               scout_name=excluded.scout_name, priority_tier=excluded.priority_tier,
+                               position=excluded.position, role=excluded.role, rumored_nil=excluded.rumored_nil,
+                               personal_val=excluded.personal_val, agent=excluded.agent, agency=excluded.agency,
+                               photo_url=excluded.photo_url, eval_date=excluded.eval_date, notes=excluded.notes,
+                               value_tag=excluded.value_tag
+                           ''',
+                           (current_player, p_data["TEAM"], scout_input, tier_input, position_input, role_input,
+                            nil_input, val_input, agent_input, agency_input, final_photo, execution_date,
+                            notes_input, value_tag_input))
+            conn.commit()
+            conn.close()
+            st.success(f"Scouting report saved for {current_player}.")
+            st.rerun()
+
+
+    # ==========================================
+    # TAB: ONE PAGER (PRINTABLE PLAYER SHEET)
+# ==========================================
+with tab_onepager:
+    st.subheader("Printable One Pager")
+
+    _op_opts = [None] + all_player_names
+    _op_default = st.session_state.get("op_player") or st.session_state.active_player
+    _op_idx = (_op_opts.index(_op_default) if _op_default in _op_opts else 0)
+    _op_pick = st.selectbox(
+        "Search player:",
+        _op_opts,
+        index=_op_idx,
+        format_func=lambda x: "" if x is None else x,
+        key="onepager_player_select",
+        label_visibility="collapsed",
+        placeholder="Type a name...",
+    )
+    if _op_pick:
+        st.session_state["op_player"] = _op_pick
+
+    op_player = _op_pick or _op_default
+    if op_player is None:
+        st.info("Search for a player above to generate a one pager.")
+    if op_player is not None:
+        op_match = df_all[df_all["PLAYER"] == op_player]
+        op_stats = op_match.iloc[0] if not op_match.empty else None
+
+        conn = sqlite3.connect('scouting_hub.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT team_name, position, agent, photo_url, notes, scout_name "
+            "FROM player_notes WHERE player_name = ?", (op_player,)
+        )
+        op_note_row = cursor.fetchone()
+        op_roster_row = cursor.execute(
+            "SELECT position, height, class_yr FROM roster WHERE bt_name = ? OR player_name = ?",
+            (op_player, op_player)
+        ).fetchone()
+        conn.close()
+
+        op_team = (
+            (op_note_row[0] if op_note_row and op_note_row[0] else None)
+            or (op_stats["TEAM"] if op_stats is not None else None)
+            or "—"
+        )
+        op_pos = (
+            (op_roster_row[0] if op_roster_row and op_roster_row[0] else None)
+            or (op_note_row[1] if op_note_row and op_note_row[1] else None)
+            or "—"
+        )
+        op_height = (
+            (op_roster_row[1] if op_roster_row and op_roster_row[1] else None)
+            or (op_stats["HEIGHT"] if op_stats is not None else None)
+            or "—"
+        )
+        op_class = (
+            (op_roster_row[2] if op_roster_row and op_roster_row[2] else None)
+            or (op_stats["CLASS"] if op_stats is not None else None)
+            or "—"
+        )
+        op_agent = (op_note_row[2] if op_note_row and op_note_row[2] else None) or "—"
+        op_scout = (op_note_row[5] if op_note_row and op_note_row[5] else "")
+        op_notes_raw = (op_note_row[4] if op_note_row and op_note_row[4] else "").strip()
+        op_photo = op_note_row[3] if op_note_row and op_note_row[3] else ""
+        if not op_photo:
+            _op_tid = ""
+            try:
+                _op_row = df_all[df_all["PLAYER"] == op_player]
+                if not _op_row.empty and "team_espn_id" in _op_row.columns:
+                    _op_tid = str(_op_row.iloc[0]["team_espn_id"])
+            except Exception:
+                pass
+            op_photo = fetch_espn_headshot(op_player, _op_tid)
+
+        banner_lines = [ln.strip() for ln in op_notes_raw.split("\n") if ln.strip()][:3]
+        banner_bullets_html = "".join(f'<li contenteditable="true">{ln}</li>' for ln in banner_lines)
+        banner_bullets_html += '<li contenteditable="true"></li>'
+
+        def _op_num(v, d=1):
             try:
                 return f"{float(v):.{d}f}"
             except (TypeError, ValueError):
                 return "—"
 
-        def _row_pct(v):
+        def _op_pct(v):
             try:
                 v = float(v)
             except (TypeError, ValueError):
                 return "—"
             return f"{v:.1f}%" if v else "—"
 
-        def _stats_table_row(row_label, r):
+        # Same box-score source and Season/Conference/Non-Conf split logic as the Player Card,
+        # so the two views always show matching numbers.
+        _op_hdr_box = load_consistent_boxscore_stats()
+        _op_hdr_row = _op_hdr_box[_op_hdr_box["PLAYER"] == op_player]
+        if len(_op_hdr_row) > 1:
+            _op_team_match = _op_hdr_row[_op_hdr_row["TEAM"].str.contains(str(op_team), case=False, na=False)]
+            if not _op_team_match.empty:
+                _op_hdr_row = _op_team_match
+        op_hdr = _op_hdr_row.iloc[0] if not _op_hdr_row.empty else None
+
+        op_conf_row = op_nonconf_row = None
+        if op_stats is not None:
+            _op_conf_map = build_team_conf_map(df_all)
+            _op_own_conf = op_stats["CONF"]
+            _op_in_conf_ids = tuple(sorted(eid for eid, c in _op_conf_map.items() if c == _op_own_conf))
+            if _op_in_conf_ids:
+                _op_conf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids)
+                _ocr = _op_conf_box[_op_conf_box["PLAYER"] == op_player]
+                op_conf_row = _ocr.iloc[0] if not _ocr.empty else None
+
+                _op_nonconf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids, exclude_conf_ids=True)
+                _oncr = _op_nonconf_box[_op_nonconf_box["PLAYER"] == op_player]
+                op_nonconf_row = _oncr.iloc[0] if not _oncr.empty else None
+
+        def _op_stats_row(label, r):
             if r is None:
-                return f"<tr><td>{row_label}</td>" + "<td>—</td>" * 16 + "</tr>"
+                return f"<tr><td>{label}</td>" + "<td>—</td>" * 13 + "</tr>"
             return (
-                f"<tr><td style='font-weight:600'>{row_label}</td>"
-                f"<td>{_row_num(r.get('GP'), 0)}</td>"
-                f"<td>{_row_num(r.get('MPG'))}</td>"
-                f"<td>{_row_num(r.get('PPG'))}</td>"
-                f"<td>{_row_num(r.get('RPG'))}</td>"
-                f"<td>{_row_num(r.get('APG'))}</td>"
-                f"<td>{_row_num(r.get('SPG'))}</td>"
-                f"<td>{_row_num(r.get('BPG'))}</td>"
-                f"<td>{_row_pct(r.get('FG_PCT'))}</td>"
-                f"<td>{_row_pct(r.get('EFG'))}</td>"
-                f"<td>{_row_pct(r.get('TS'))}</td>"
-                f"<td>{_row_pct(r.get('TWO_P'))}</td>"
-                f"<td>{_row_pct(r.get('THREE_P'))}</td>"
-                f"<td>{_row_pct(r.get('USG'))}</td>"
-                f"<td>{_row_pct(r.get('AST_PCT'))}</td>"
-                f"<td>{_row_pct(r.get('OR_PCT'))}</td>"
-                f"<td>{_row_pct(r.get('DR_PCT'))}</td>"
+                f"<tr><td>{label}</td>"
+                f"<td>{_op_num(r.get('GP'), 0)}</td>"
+                f"<td>{_op_num(r.get('MPG'))}</td>"
+                f"<td>{_op_num(r.get('PPG'))}</td>"
+                f"<td>{_op_num(r.get('RPG'))}</td>"
+                f"<td>{_op_num(r.get('APG'))}</td>"
+                f"<td>{_op_num(r.get('SPG'))}</td>"
+                f"<td>{_op_num(r.get('BPG'))}</td>"
+                f"<td>{_op_pct(r.get('FG_PCT'))}</td>"
+                f"<td>{_op_pct(r.get('TS'))}</td>"
+                f"<td>{_op_pct(r.get('TWO_P'))}</td>"
+                f"<td>{_op_pct(r.get('THREE_P'))}</td>"
+                f"<td>{_op_pct(r.get('USG'))}</td>"
+                f"<td>{_op_pct(r.get('AST_PCT'))}</td>"
                 "</tr>"
             )
 
-        _conf_map = build_team_conf_map(df_all)
-        _own_conf = p_data["CONF"]
-        _in_conf_ids = tuple(sorted(eid for eid, c in _conf_map.items() if c == _own_conf))
+        if op_hdr is not None:
+            _op_top100_box = load_consistent_boxscore_stats(max_opp_rank=100)
+            _op_t100r = _op_top100_box[_op_top100_box["PLAYER"] == op_player]
+            op_top100_row = _op_t100r.iloc[0] if not _op_t100r.empty else None
 
-        _conf_row = _non_conf_row = None
-        if _in_conf_ids:
-            _conf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids)
-            _cr = _conf_box[_conf_box["PLAYER"] == gl_player]
-            _conf_row = _cr.iloc[0] if not _cr.empty else None
+            _op_top50_box = load_consistent_boxscore_stats(max_opp_rank=50)
+            _op_t50r = _op_top50_box[_op_top50_box["PLAYER"] == op_player]
+            op_top50_row = _op_t50r.iloc[0] if not _op_t50r.empty else None
 
-            _nonconf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids, exclude_conf_ids=True)
-            _ncr = _nonconf_box[_nonconf_box["PLAYER"] == gl_player]
-            _non_conf_row = _ncr.iloc[0] if not _ncr.empty else None
+            _op_rows_html = _op_stats_row("Season", op_hdr)
+            if op_conf_row is not None or op_nonconf_row is not None:
+                _op_rows_html += _op_stats_row("Conference", op_conf_row)
+                _op_rows_html += _op_stats_row("Non-Conf", op_nonconf_row)
+            _op_rows_html += _op_stats_row("vs Top 100", op_top100_row)
+            _op_rows_html += _op_stats_row("vs Top 50", op_top50_row)
 
-        _stats_rows_html = _stats_table_row("Season", _hdr)
-        if _conf_row is not None or _non_conf_row is not None:
-            _stats_rows_html += _stats_table_row("Conference", _conf_row)
-            _stats_rows_html += _stats_table_row("Non-Conf", _non_conf_row)
-
-        st.markdown(
-            "<style>.card-stats-table{width:100%;border-collapse:collapse;font-size:0.82rem;margin-top:8px;}"
-            ".card-stats-table th{text-align:center;padding:4px 6px;color:#6b7280;font-size:0.72rem;"
-            "text-transform:uppercase;border-bottom:2px solid #e5e7eb;}"
-            ".card-stats-table td{text-align:center;padding:5px 6px;border-bottom:1px solid #f0f0f0;}</style>"
-            "<table class='card-stats-table'><thead><tr>"
-            "<th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>"
-            "<th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>"
-            "<th>AST%</th><th>OR%</th><th>DR%</th>"
-            "</tr></thead><tbody>" + _stats_rows_html + "</tbody></table>",
-            unsafe_allow_html=True,
-        )
-        if _conf_row is None and _non_conf_row is None:
-            st.caption("Conference/Non-Conference split unavailable — couldn't match this team's conference to game log opponents.")
-
-    st.divider()
-
-    # ── Bucketed stat categories ──────────────────────────────────────────
-    card_benchmarks = build_national_benchmarks(df_all)
-    if _hdr is not None:
-        _bt = p_data  # BartTorvik row for PRPG/BPM/OBPM/DBPM/ORTG/THREE_P_100
-
-        def _bt_pct(col, val):
-            # Use position-filtered benchmarks; fall back to national
-            vals = _active_bm.get(col)
-            if vals:
-                if not val or (isinstance(val, float) and math.isnan(val)):
-                    return None
-                try:
-                    p = get_pct(float(val), vals)
-                    return (100 - p) if col in _BT_LOWER else p
-                except Exception:
-                    return None
-            return national_pct(col, val, card_benchmarks)
-
-        eff_html = _cat_table("Efficiency", [
-            _stat_row_colored("ORTG",  _bt.get("ORTG"),  _bt_pct("ORTG",  _bt.get("ORTG"))),
-            _stat_row_colored("USG%",  _hdr.get("USG"),  _box_pct("USG",  _hdr.get("USG")),  "%"),
-            _stat_row_colored("TS%",   _hdr.get("TS"),   _box_pct("TS",   _hdr.get("TS")),   "%"),
-            _stat_row_colored("EFG%",  _hdr.get("EFG"),  _box_pct("EFG",  _hdr.get("EFG")),  "%"),
-        ])
-
-        imp_html = _cat_table("Impact", [
-            _stat_row_colored("PRPG",  _bt.get("PRPG"),  _bt_pct("PRPG",  _bt.get("PRPG"))),
-            _stat_row_colored("BPM",   _bt.get("BPM"),   _bt_pct("BPM",   _bt.get("BPM"))),
-            _stat_row_colored("OBPM",  _bt.get("OBPM"),  _bt_pct("OBPM",  _bt.get("OBPM"))),
-            _stat_row_colored("DBPM",  _bt.get("DBPM"),  _bt_pct("DBPM",  _bt.get("DBPM"))),
-            _stat_row_colored("MIN%",  _bt.get("MIN_PCT"), _bt_pct("MIN_PCT", _bt.get("MIN_PCT")), "%"),
-        ])
-
-        play_html = _cat_table("Playmaking", [
-            _stat_row_colored("AST%",   _hdr.get("AST_PCT"), _box_pct("AST_PCT", _hdr.get("AST_PCT")), "%"),
-            _stat_row_colored("TOV%",   _hdr.get("TOV_PCT"), _box_pct("TOV_PCT", _hdr.get("TOV_PCT")), "%"),
-            _stat_row_colored("AST/TO", _hdr.get("AST_TO"),  _box_pct("AST_TO",  _hdr.get("AST_TO")),  "", 2),
-            _stat_row_colored("USG%",   _hdr.get("USG"),     _box_pct("USG",     _hdr.get("USG")),     "%"),
-        ])
-
-        shoot_html = _cat_table("Shooting", [
-            _stat_row_colored("TS%",     _hdr.get("TS"),       _box_pct("TS",      _hdr.get("TS")),      "%"),
-            _stat_row_colored("2P%",     _hdr.get("TWO_P"),    _box_pct("TWO_P",   _hdr.get("TWO_P")),   "%"),
-            _stat_row_colored("3P%",     _hdr.get("THREE_P"),  _box_pct("THREE_P", _hdr.get("THREE_P")), "%"),
-            _stat_row_colored("3P Rate", _bt.get("THREE_P_100"), _bt_pct("THREE_P", _bt.get("THREE_P_100")), " /100"),
-            _stat_row_colored("FT%",     _hdr.get("FT_PCT"),   _box_pct("FT_PCT",  _hdr.get("FT_PCT")),  "%"),
-            _stat_row_colored("FTR",     _hdr.get("FTR"),      _box_pct("FTR",     _hdr.get("FTR")),     "%"),
-        ])
-
-        reb_html = _cat_table("Rebounding", [
-            _stat_row_colored("OREB%", _hdr.get("OR_PCT"), _box_pct("OR_PCT", _hdr.get("OR_PCT")), "%"),
-            _stat_row_colored("DREB%", _hdr.get("DR_PCT"), _box_pct("DR_PCT", _hdr.get("DR_PCT")), "%"),
-            _stat_row_colored("RPG",   _hdr.get("RPG"),    _box_pct("RPG",    _hdr.get("RPG"))),
-        ])
-
-        def_html = _cat_table("Defense", [
-            _stat_row_colored("STL%",  _hdr.get("STL_PCT"), _box_pct("STL_PCT", _hdr.get("STL_PCT")), "%"),
-            _stat_row_colored("BLK%",  _hdr.get("BLK_PCT"), _box_pct("BLK_PCT", _hdr.get("BLK_PCT")), "%"),
-            _stat_row_colored("DBPM",  _bt.get("DBPM"),     _bt_pct("DBPM",     _bt.get("DBPM"))),
-            _stat_row_colored("SPG",   _hdr.get("SPG"),     _box_pct("SPG",     _hdr.get("SPG"))),
-            _stat_row_colored("BPG",   _hdr.get("BPG"),     _box_pct("BPG",     _hdr.get("BPG"))),
-        ])
-
-        # Team pace/offense/defense context (KenPom) — not position-benchmarked, just a
-        # straight national percentile among all teams, so this is deliberately not routed
-        # through _bt_pct's position-filtered lookup.
-        _team_ctx_df = build_team_context()
-        _team_ctx_row = _team_ctx_df[_team_ctx_df["TEAM"] == p_data["TEAM"]]
-        _team_ctx = _team_ctx_row.iloc[0] if not _team_ctx_row.empty else None
-
-        team_html = ""
-        if _team_ctx is not None:
-            team_html = _cat_table("Team Context", [
-                _stat_row_colored("Tempo",    _team_ctx.get("TEAM_TEMPO"), national_pct("TEAM_TEMPO", _team_ctx.get("TEAM_TEMPO"), card_benchmarks)),
-                _stat_row_colored("Team Off", _team_ctx.get("TEAM_ADJ_O"), national_pct("TEAM_ADJ_O", _team_ctx.get("TEAM_ADJ_O"), card_benchmarks)),
-                _stat_row_colored("Team Def", _team_ctx.get("TEAM_ADJ_D"), national_pct("TEAM_ADJ_D", _team_ctx.get("TEAM_ADJ_D"), card_benchmarks)),
-            ])
-
-        st.caption(f"Percentiles vs. all {_player_pos_group}s nationally")
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown(eff_html + shoot_html + play_html, unsafe_allow_html=True)
-        with col_right:
-            st.markdown(imp_html + reb_html + def_html + team_html, unsafe_allow_html=True)
-
-    curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
-
-    st.write("**Competition Split**")
-
-    _split = st.radio(
-        "Competition split",
-        ["All Games", "Top 100", "Top 50"],
-        horizontal=True,
-        key="profile_split",
-        label_visibility="collapsed",
-    )
-
-    _max_rank = None if _split == "All Games" else (100 if _split == "Top 100" else 50)
-
-    if not _gl_ready:
-        st.info("Run `python3 build_game_logs.py` to enable the shot chart.")
-    else:
-        _box_df = load_consistent_boxscore_stats(_max_rank)
-        _pbox = _box_df[_box_df["PLAYER"] == gl_player]
-        if len(_pbox) > 1:
-            _bt_team = p_data["TEAM"]
-            _team_match = _pbox[_pbox["TEAM"].str.contains(_bt_team, case=False, na=False)]
-            if not _team_match.empty:
-                _pbox = _team_match
-
-        # Shot chart section — use matched team_espn_id to avoid name collisions
-        _team_id = _pbox.iloc[0]["team_espn_id"] if not _pbox.empty and "team_espn_id" in _pbox.columns else None
-        _shots = load_player_shots(gl_player, _team_id)
-        if not _shots.empty:
-            st.write("**Shot Chart**")
-            _chart_title = f"{current_player}  ·  {_split}"
-            _fig = draw_shot_chart(_shots, title=_chart_title)
-            col_chart, col_gap = st.columns([3, 2])
-            with col_chart:
-                st.pyplot(_fig, use_container_width=True)
-            plt.close(_fig)
-
-    st.divider()
-
-    with st.expander(f"Find Comps: {current_player}", expanded=False):
-        if curated_player:
-            if curated_player.get("writeup"):
-                st.write(curated_player["writeup"])
-            st.write(f"**Projection:** {curated_player.get('projection', '')}  ·  "
-                     f"**Role:** {curated_player.get('role', '')}")
-            st.divider()
-
-        if df_all is None or df_all.empty:
-            st.warning("BartTorvik data unavailable.")
+            stats_table_html = f"""
+            <table class="stats">
+              <thead><tr>
+                <th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>
+                <th>FG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th><th>AST%</th>
+              </tr></thead>
+              <tbody>{_op_rows_html}</tbody>
+            </table>
+            """
         else:
-            comp_bucket_options = ["Guard", "Wing", "Big"]
-            auto_bucket = POS_TAG_BUCKET.get(p_data.get("POS_TAG", ""), "Wing")
-            cc1, cc2 = st.columns([1, 2])
-            with cc1:
-                comp_n = st.slider("Comps to show:", 3, 15, 8, key="comp_n_slider")
-            with cc2:
-                comp_bucket = st.radio("Position group for weighting:", comp_bucket_options,
-                                       index=comp_bucket_options.index(auto_bucket),
-                                       horizontal=True, key="comp_bucket_radio")
-
-            top_matches, dominant_cat = find_stat_comps(
-                current_player, df_all, card_benchmarks, n=comp_n, bucket_override=comp_bucket
+            stats_table_html = (
+                '<div style="font-family:Arimo,sans-serif;font-size:12px;color:#8494a5;">'
+                'No BartTorvik stat line available for this player yet.</div>'
             )
 
-            boost_note = f" boosted toward this player's real-stat strength: **{dominant_cat}**" if dominant_cat else ""
-            st.write(f"**Top {len(top_matches)} comps from {len(df_all):,} current-season players** "
-                     f"— height ±5in, weighted by **{comp_bucket}** profile{boost_note}, "
-                     f"real KenPom team strength nudges the ranking, shot-selection profile and "
-                     f"zone FG% (rim/mid/three) also weighted in where shot-chart data exists.")
+        staff_notes_html = "".join('<li contenteditable="true"></li>' for _ in range(5))
+        photo_style = f"background-image:url('{op_photo}');" if op_photo else ""
 
-            def _zone_fmt(freq, eff):
-                eff_txt = f"{eff:.0f}% FG" if pd.notna(eff) else "no FG% sample"
-                return f"{freq:.0f}% ({eff_txt})"
-
-            _zone_df = merge_shot_zones(df_all)
-            _target_zone_row = _zone_df[_zone_df["PLAYER"] == current_player]
-            if not _target_zone_row.empty and pd.notna(_target_zone_row.iloc[0].get("PCT_RIM")):
-                tz = _target_zone_row.iloc[0]
-                st.caption(
-                    f"**{current_player}'s shot profile (share of FGA, zone FG%):** "
-                    f"Rim {_zone_fmt(tz['PCT_RIM'], tz['RIM_FG_PCT'])} · "
-                    f"Mid {_zone_fmt(tz['PCT_MID'], tz['MID_FG_PCT'])} · "
-                    f"Three {_zone_fmt(tz['PCT_THREE'], tz['THREE_FG_PCT'])}"
-                )
-
-            COMP_STAT_LABELS = {
-                "ORTG": "ORtg", "AST": "AST%", "TO": "TO%", "STL": "STL%", "MIN_PCT": "Min%",
-                "THREE_P": "3P%", "TS": "TS%", "BPM": "BPM", "USG": "USG%", "EFG": "eFG%",
-                "OBPM": "OBPM", "DBPM": "DBPM", "OR": "OR%", "DR": "DR%", "BLK": "BLK%",
-                "FTR": "FT Rate", "FT_PCT": "FT%", "TWO_P": "2P%", "PRPG": "PRPG",
-                "AST_TO": "AST/TO", "TEAM_ADJ_EM": "Team AdjEM",
-                "PCT_RIM": "Rim FGA%", "PCT_MID": "Mid FGA%", "PCT_THREE": "3PT FGA%",
-                "RIM_FG_PCT": "Rim FG%", "MID_FG_PCT": "Mid FG%", "THREE_FG_PCT": "3PT FG%",
-            }
-
-            def _stat_val(row, stat):
-                v = row.get(stat)
-                if v is None or (isinstance(v, float) and math.isnan(v)):
-                    return None
-                if stat in ("TS", "EFG") and v <= 1.0:
-                    v = v * 100
-                return float(v)
-
-            def _plain_tile(label, value_str):
-                return (
-                    "<div style=\"flex:1;padding:6px 4px;text-align:center;border-right:1px solid #e5e7eb;background:#F1F5F9;\">"
-                    "<div style=\"font-size:12px;font-weight:600;color:#0F172A;\">" + value_str + "</div>"
-                    "<div style=\"font-size:7px;color:#64748B;text-transform:uppercase;margin-top:1px;\">" + label + "</div>"
-                    "</div>"
-                )
-
-            def _pct_tile(label, value, pct, decimals=1, suffix="%"):
-                bg, fg = pct_color(pct)
-                pct_txt = f"({pct:.0f}th)" if pct is not None else ""
-                val_txt = fmt(value, decimals, suffix) if value is not None else "—"
-                return (
-                    "<div style=\"flex:1;padding:6px 4px;text-align:center;border-right:1px solid #e5e7eb;background:" + bg + ";\">"
-                    "<div style=\"font-size:12px;font-weight:600;color:" + fg + ";\">" + val_txt + "</div>"
-                    "<div style=\"font-size:7px;color:" + fg + ";opacity:.75;text-transform:uppercase;margin-top:1px;\">" + label + "</div>"
-                    "<div style=\"font-size:7px;color:" + fg + ";opacity:.6;\">" + pct_txt + "</div>"
-                    "</div>"
-                )
-
-            def _team_identity_tag(row):
-                """Offense/defense stylistic identity for a comp's team, from KenPom
-                AdjO/AdjD national percentiles — None when a team isn't a clear outlier
-                either way (most teams), so the badge only shows up when it's meaningful."""
-                o_pct = national_pct("TEAM_ADJ_O", row.get("TEAM_ADJ_O"), card_benchmarks)
-                d_pct = national_pct("TEAM_ADJ_D", row.get("TEAM_ADJ_D"), card_benchmarks)
-                if o_pct is None or d_pct is None:
-                    return None
-                if o_pct >= 75 and d_pct >= 75:
-                    return ("Complete Team", "#6d28d9")
-                if o_pct >= 75 and o_pct - d_pct >= 15:
-                    return ("High-Octane Offense", "#c2410c")
-                if d_pct >= 75 and d_pct - o_pct >= 15:
-                    return ("Elite Defense", "#1d4ed8")
-                return None
-
-            if not top_matches:
-                st.info("No close height/stat matches found in the current season database.")
-            else:
-                for _comp_idx, (match_score, match_data) in enumerate(top_matches):
-                    pct = round(match_score * 100, 1)
-                    c_name = str(match_data.get("PLAYER", ""))
-                    c_team = str(match_data.get("TEAM", ""))
-                    c_conf = str(match_data.get("CONF", ""))
-                    c_ht   = str(match_data.get("HEIGHT", ""))
-                    c_class = str(match_data.get("CLASS", "") or "")
-                    c_identity = _team_identity_tag(match_data)
-
-                    # Basic box score — plain, no percentile, easy to scan at a glance.
-                    basic_row_html = (
-                        "<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;overflow:hidden;margin-bottom:6px;\">"
-                        + _plain_tile("PPG", fmt(_stat_val(match_data, "PPG"), 1))
-                        + _plain_tile("RPG", fmt(_stat_val(match_data, "RPG"), 1))
-                        + _plain_tile("APG", fmt(_stat_val(match_data, "APG"), 1)).replace("border-right:1px solid #e5e7eb;", "")
-                        + "</div>"
-                    )
-
-                    # Advanced stats — percentile-colored, same visual language as the Player Card.
-                    adv_stats = [("TS", "TS%"), ("USG", "USG%"), ("EFG", "eFG%"), ("BPM", "BPM"),
-                                 ("AST", "AST%"), ("TEAM_ADJ_EM", "Team AdjEM")]
-                    adv_html = ""
-                    for i, (stat, label) in enumerate(adv_stats):
-                        v = _stat_val(match_data, stat)
-                        p = national_pct(stat, v, card_benchmarks)
-                        suffix = "" if stat in ("BPM", "TEAM_ADJ_EM") else "%"
-                        tile = _pct_tile(label, v, p, suffix=suffix)
-                        if i == len(adv_stats) - 1:
-                            tile = tile.replace("border-right:1px solid #e5e7eb;", "")
-                        adv_html += tile
-                    adv_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
-                                    "overflow:hidden;margin-bottom:6px;\">" + adv_html + "</div>")
-
-                    # "Why matched" callout — the specific stats behind this player's dominant-category
-                    # boost, with real values, so it's clear *why* this is a comp, not just a score.
-                    why_html = ""
-                    if dominant_cat:
-                        cat_stats = COMP_BOOST_STATS.get(dominant_cat, [])
-                        cat_tiles = ""
-                        shown = 0
-                        for stat in cat_stats:
-                            v = _stat_val(match_data, stat)
-                            if v is None:
-                                continue
-                            p = national_pct(stat, match_data.get(stat), card_benchmarks)
-                            label = COMP_STAT_LABELS.get(stat, stat)
-                            decimals = 2 if stat == "AST_TO" else 1
-                            suffix = "" if stat in ("AST_TO", "BPM", "TEAM_ADJ_EM") else "%"
-                            cat_tiles += _pct_tile(label, v, p, decimals=decimals, suffix=suffix)
-                            shown += 1
-                        if shown:
-                            idx = cat_tiles.rfind("border-right:1px solid #e5e7eb;")
-                            if idx != -1:
-                                cat_tiles = cat_tiles[:idx] + cat_tiles[idx + len("border-right:1px solid #e5e7eb;"):]
-                            why_html = (
-                                "<div style=\"margin-bottom:6px;\">"
-                                "<div style=\"font-size:8px;font-weight:700;color:#92600a;text-transform:uppercase;"
-                                "letter-spacing:.04em;margin-bottom:4px;\">⭐ Matched on: " + dominant_cat + "</div>"
-                                "<div style=\"display:flex;border:1px solid #f9d98a;border-radius:5px;overflow:hidden;"
-                                "background:#fffdf7;\">" + cat_tiles + "</div>"
-                                "</div>"
-                            )
-
-                    zone_row_html = ""
-                    if pd.notna(match_data.get("PCT_RIM")):
-                        zone_html = (
-                            _pct_tile("Rim FGA", match_data["PCT_RIM"], None, decimals=0)
-                            + _pct_tile("Mid FGA", match_data["PCT_MID"], None, decimals=0)
-                            + _pct_tile("Three FGA", match_data["PCT_THREE"], None, decimals=0).replace("border-right:1px solid #e5e7eb;", "")
-                        )
-                        zone_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
-                                          "overflow:hidden;margin-bottom:6px;\">" + zone_html + "</div>")
-
-                    identity_badge_html = ""
-                    if c_identity:
-                        _id_label, _id_color = c_identity
-                        identity_badge_html = (
-                            "<span style=\"display:inline-block;margin-top:4px;font-size:8px;font-weight:600;"
-                            "padding:2px 7px;border-radius:3px;background:" + _id_color + "1A;color:" + _id_color +
-                            ";border:1px solid " + _id_color + "55;\">" + _id_label + "</span>"
-                        )
-
-                    html = (
-                        "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
-                        "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
-                        "<div>"
-                        "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
-                        "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht
-                        + (" &middot; " + c_class if c_class else "") + " &middot; " + c_team + " (" + c_conf + ")</div>"
-                        + identity_badge_html +
-                        "</div>"
-                        "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
-                        "</div>"
-                        + basic_row_html
-                        + adv_row_html
-                        + why_html
-                        + zone_row_html +
-                        "<div style=\"height:3px;background:#e5e7eb;border-radius:2px;\">"
-                        "<div style=\"height:100%;width:" + str(pct) + "%;background:#2774AE;border-radius:2px;\"></div>"
-                        "</div>"
-                        "</div>"
-                    )
-                    st.markdown(html, unsafe_allow_html=True)
-                    if st.button(f"↗ Open {c_name}'s Player Card", key=f"comp_open_{current_player}_{_comp_idx}_{c_name}"):
-                        st.session_state.active_player = c_name
-                        st.session_state.go_to_profile = True
-                        st.rerun()
-
-    st.divider()
-
-    st.write("**Detailed Scouting Report**")
-    col_scout, col_pos, col_role = st.columns(3)
-    with col_scout:
-        scout_input = st.text_input("Assigned Staff Member / Scout Name:", value=saved_scout)
-    with col_pos:
-        position_list = ["PG", "CG", "W", "F", "C"]
-        pos_idx = position_list.index(saved_pos) if saved_pos in position_list else 0
-        position_input = st.selectbox("Primary Position Grouping:", position_list, index=pos_idx)
-    with col_role:
-        role_input = st.text_input("Projected Tactical Role Allocation (e.g., Starting Point Guard):", value=saved_role)
-
-    st.write("**🎯 Front Office Target Board**")
-    col_tier, col_valtag = st.columns(2)
-    with col_tier:
-        tier_input = st.selectbox("Priority", TIER_OPTIONS,
-                                  index=TIER_OPTIONS.index(saved_tier) if saved_tier in TIER_OPTIONS else 1)
-    with col_valtag:
-        value_tag_input = st.selectbox("Value Tag", VALUE_TAG_OPTIONS,
-                                       index=VALUE_TAG_OPTIONS.index(saved_value_tag) if saved_value_tag in VALUE_TAG_OPTIONS else 1)
-
-    st.write("**Representation & Personnel Valuation**")
-    col_agent, col_agency, col_nil, col_val = st.columns(4)
-    with col_agent:
-        agent_input = st.text_input("Primary Agent:", value=saved_agent)
-    with col_agency:
-        agency_input = st.text_input("Agency:", value=saved_agency)
-    with col_nil:
-        nil_input = st.text_input("Rumored External NIL:", value=saved_nil)
-    with col_val:
-        val_input = st.text_input("Internal Staff Valuation:", value=saved_val)
-
-    photo_input = st.text_input("Headshot Image Link (Optional manual override):", value=saved_photo)
-    notes_input = st.text_area("Detailed Background Intel, Character Evaluations, and General Notes:",
-                               value=saved_notes, height=150)
-
-    if st.button("Save Scouting Report"):
-        execution_date = datetime.now().strftime("%Y-%m-%d")
-        _tid2 = str(p_data["team_espn_id"]) if "team_espn_id" in p_data.index and pd.notna(p_data["team_espn_id"]) else ""
-        final_photo = photo_input if photo_input else fetch_espn_headshot(current_player, _tid2)
-        conn = sqlite3.connect('scouting_hub.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-                       INSERT INTO player_notes (player_name, team_name, scout_name, priority_tier, position, role,
-                                                 rumored_nil, personal_val, agent, agency, photo_url, eval_date,
-                                                 notes, value_tag)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(player_name) DO
-                       UPDATE SET
-                           scout_name=excluded.scout_name, priority_tier=excluded.priority_tier,
-                           position=excluded.position, role=excluded.role, rumored_nil=excluded.rumored_nil,
-                           personal_val=excluded.personal_val, agent=excluded.agent, agency=excluded.agency,
-                           photo_url=excluded.photo_url, eval_date=excluded.eval_date, notes=excluded.notes,
-                           value_tag=excluded.value_tag
-                       ''',
-                       (current_player, p_data["TEAM"], scout_input, tier_input, position_input, role_input,
-                        nil_input, val_input, agent_input, agency_input, final_photo, execution_date,
-                        notes_input, value_tag_input))
-        conn.commit()
-        conn.close()
-        st.success(f"Scouting report saved for {current_player}.")
-        st.rerun()
-
-
-# ==========================================
-# TAB: ONE PAGER (PRINTABLE PLAYER SHEET)
-# ==========================================
-with tab_onepager:
-    st.subheader("Printable One Pager")
-    st.caption(
-        "Shows the currently active player (set from the Depth Chart, Portal Discovery Engine, or "
-        "Front Office Target Board). Click into the sheet to add notes, then use the print button."
-    )
-
-    op_player = st.session_state.active_player
-    op_match = df_all[df_all["PLAYER"] == op_player]
-    op_stats = op_match.iloc[0] if not op_match.empty else None
-    gl_op_player = resolve_game_log_name(op_player)
-
-    conn = sqlite3.connect('scouting_hub.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT team_name, position, agent, photo_url, notes, scout_name "
-        "FROM player_notes WHERE player_name = ?", (op_player,)
-    )
-    op_note_row = cursor.fetchone()
-    op_roster_row = cursor.execute(
-        "SELECT position, height, class_yr FROM roster WHERE bt_name = ? OR player_name = ?",
-        (op_player, op_player)
-    ).fetchone()
-    conn.close()
-
-    op_team = (
-        (op_note_row[0] if op_note_row and op_note_row[0] else None)
-        or (op_stats["TEAM"] if op_stats is not None else None)
-        or "—"
-    )
-    op_height = (
-        (op_roster_row[1] if op_roster_row and op_roster_row[1] else None)
-        or (op_stats["HEIGHT"] if op_stats is not None else None)
-        or "—"
-    )
-    # Advance class year, same convention as the Player Card: data is 2025-26, we're building for 2026-27
-    _op_class_advance = {"Fr": "So", "So": "Jr", "Jr": "Sr", "Sr": "Graduate",
-                          "Rs-Fr": "Fr", "Rs-So": "So", "Rs-Jr": "Jr", "Rs-Sr": "Sr"}
-    _op_raw_class = (
-        (op_roster_row[2] if op_roster_row and op_roster_row[2] else None)
-        or (op_stats["CLASS"] if op_stats is not None else None)
-    )
-    op_class = _op_class_advance.get(str(_op_raw_class).strip(), str(_op_raw_class).strip()) if _op_raw_class else "—"
-
-    op_scout = (op_note_row[5] if op_note_row and op_note_row[5] else "")
-    op_notes_raw = (op_note_row[4] if op_note_row and op_note_row[4] else "").strip()
-    op_photo = op_note_row[3] if op_note_row and op_note_row[3] else ""
-
-    _op_tid = ""
-    try:
-        _op_row = df_all[df_all["PLAYER"] == op_player]
-        if not _op_row.empty and "team_espn_id" in _op_row.columns:
-            _tid_val = _op_row.iloc[0]["team_espn_id"]
-            if pd.notna(_tid_val):
-                _op_tid = str(_tid_val)
-    except Exception:
-        pass
-    if not _op_tid:
-        try:
-            _op_gl_conn = sqlite3.connect("scouting_hub.db")
-            _op_tid_row = _op_gl_conn.execute(
-                "SELECT team_espn_id FROM player_game_logs WHERE player_name = ? AND team_espn_id IS NOT NULL LIMIT 1",
-                (gl_op_player,)
-            ).fetchone()
-            _op_gl_conn.close()
-            if _op_tid_row:
-                _op_tid = str(_op_tid_row[0])
-        except Exception:
-            pass
-
-    # Position: roster/scouting-report entry first, then fall back to the ESPN bio scrape
-    # (same source the Player Card uses), since most portal players have no roster row.
-    op_pos = (
-        (op_roster_row[0] if op_roster_row and op_roster_row[0] else None)
-        or (op_note_row[1] if op_note_row and op_note_row[1] else None)
-        or fetch_espn_bio(op_player, _op_tid).get("position", "")
-        or "—"
-    )
-
-    if not op_photo:
-        op_photo = fetch_espn_headshot(op_player, _op_tid)
-
-    banner_lines = [ln.strip() for ln in op_notes_raw.split("\n") if ln.strip()][:3]
-    banner_bullets_html = "".join(f'<li contenteditable="true">{ln}</li>' for ln in banner_lines)
-    banner_bullets_html += '<li contenteditable="true"></li>'
-
-    def _op_num(v, d=1):
-        try:
-            return f"{float(v):.{d}f}"
-        except (TypeError, ValueError):
-            return "—"
-
-    def _op_pct(v):
-        try:
-            v = float(v)
-        except (TypeError, ValueError):
-            return "—"
-        return f"{v:.1f}%" if v else "—"
-
-    # Same box-score source and Season/Conference/Non-Conf split logic as the Player Card,
-    # so the two views always show matching numbers.
-    _op_hdr_box = load_consistent_boxscore_stats()
-    _op_hdr_row = _op_hdr_box[_op_hdr_box["PLAYER"] == gl_op_player]
-    if len(_op_hdr_row) > 1:
-        _op_team_match = _op_hdr_row[_op_hdr_row["TEAM"].str.contains(str(op_team), case=False, na=False)]
-        if not _op_team_match.empty:
-            _op_hdr_row = _op_team_match
-    op_hdr = _op_hdr_row.iloc[0] if not _op_hdr_row.empty else None
-
-    op_conf_row = op_nonconf_row = None
-    if op_stats is not None:
-        _op_conf_map = build_team_conf_map(df_all)
-        _op_own_conf = op_stats["CONF"]
-        _op_in_conf_ids = tuple(sorted(eid for eid, c in _op_conf_map.items() if c == _op_own_conf))
-        if _op_in_conf_ids:
-            _op_conf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids)
-            _ocr = _op_conf_box[_op_conf_box["PLAYER"] == gl_op_player]
-            op_conf_row = _ocr.iloc[0] if not _ocr.empty else None
-
-            _op_nonconf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids, exclude_conf_ids=True)
-            _oncr = _op_nonconf_box[_op_nonconf_box["PLAYER"] == gl_op_player]
-            op_nonconf_row = _oncr.iloc[0] if not _oncr.empty else None
-
-    def _op_stats_row(label, r):
-        if r is None:
-            return f"<tr><td>{label}</td>" + "<td>—</td>" * 16 + "</tr>"
-        return (
-            f"<tr><td>{label}</td>"
-            f"<td>{_op_num(r.get('GP'), 0)}</td>"
-            f"<td>{_op_num(r.get('MPG'))}</td>"
-            f"<td>{_op_num(r.get('PPG'))}</td>"
-            f"<td>{_op_num(r.get('RPG'))}</td>"
-            f"<td>{_op_num(r.get('APG'))}</td>"
-            f"<td>{_op_num(r.get('SPG'))}</td>"
-            f"<td>{_op_num(r.get('BPG'))}</td>"
-            f"<td>{_op_pct(r.get('FG_PCT'))}</td>"
-            f"<td>{_op_pct(r.get('EFG'))}</td>"
-            f"<td>{_op_pct(r.get('TS'))}</td>"
-            f"<td>{_op_pct(r.get('TWO_P'))}</td>"
-            f"<td>{_op_pct(r.get('THREE_P'))}</td>"
-            f"<td>{_op_pct(r.get('USG'))}</td>"
-            f"<td>{_op_pct(r.get('AST_PCT'))}</td>"
-            f"<td>{_op_pct(r.get('OR_PCT'))}</td>"
-            f"<td>{_op_pct(r.get('DR_PCT'))}</td>"
-            "</tr>"
-        )
-
-    if op_hdr is not None:
-        _op_rows_html = _op_stats_row("Season", op_hdr)
-        if op_conf_row is not None or op_nonconf_row is not None:
-            _op_rows_html += _op_stats_row("Conference", op_conf_row)
-            _op_rows_html += _op_stats_row("Non-Conf", op_nonconf_row)
-
-        stats_table_html = f"""
-        <table class="stats">
-          <thead><tr>
-            <th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>
-            <th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>
-            <th>AST%</th><th>OR%</th><th>DR%</th>
-          </tr></thead>
-          <tbody>{_op_rows_html}</tbody>
-        </table>
-        """
-    else:
-        stats_table_html = (
-            '<div style="font-family:Arimo,sans-serif;font-size:12px;color:#8494a5;">'
-            'No BartTorvik stat line available for this player yet.</div>'
-        )
-
-    staff_notes_html = "".join('<li contenteditable="true"></li>' for _ in range(5))
-    photo_style = f"background-image:url('{op_photo}');" if op_photo else ""
-
-    one_pager_html = f"""
-<!doctype html><html><head><meta charset="UTF-8">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700;800&family=Arimo:wght@400;700&display=swap" rel="stylesheet">
-<style>
-  :root {{ --navy: #1b3a5c; --banner-blue: #3a6ea8; --ink: #1b3a5c; --rule: #1b3a5c; --paper: #ffffff; }}
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ background: #e8e8e8; font-family: 'Spectral', Georgia, serif; color: var(--ink); padding: 24px 0; }}
-  .toolbar {{ max-width: 8.5in; margin: 0 auto 14px; display: flex; justify-content: flex-end; gap: 8px; padding: 0 8px; }}
-  .toolbar button {{ font-family: 'Arimo', Arial, sans-serif; font-size: 13px; font-weight: 700; padding: 8px 16px;
-    border: none; border-radius: 4px; cursor: pointer; background: var(--navy); color: #fff; }}
-  .toolbar button.secondary {{ background: #6b7c8f; }}
-  .page {{ width: 8.5in; min-height: 11in; margin: 0 auto; background: var(--paper); padding: 0.45in 0.5in 0.5in;
-    box-shadow: 0 2px 14px rgba(0,0,0,0.18); }}
-  .banner {{ background: var(--banner-blue); color: #fff; padding: 22px 26px 20px; display: flex;
-    justify-content: space-between; align-items: flex-start; border-bottom: 3px solid var(--navy); }}
-  .banner h1 {{ font-size: 40px; font-weight: 600; line-height: 1.05; margin-bottom: 10px; letter-spacing: 0.2px; }}
-  .facts {{ font-size: 15.5px; font-weight: 700; line-height: 1.5; }}
-  .facts span.lbl {{ font-weight: 400; opacity: 0.85; }}
-  .banner-notes {{ list-style: none; margin-top: 12px; font-size: 13.5px; font-weight: 400; line-height: 1.4; max-width: 5.4in; }}
-  .banner-notes li {{ padding-left: 20px; position: relative; margin-bottom: 4px; outline: none; }}
-  .banner-notes li::before {{ content: "\\2756"; position: absolute; left: 0; font-size: 10px; opacity: 0.85; }}
-  .banner-notes li:empty::after {{ content: "Click to add profile note..."; opacity: 0.5; }}
-  .headshot {{ width: 130px; height: 130px; border-radius: 6px; background-color: #dce6f2; background-size: cover;
-    background-position: center; display: flex; align-items: center; justify-content: center;
-    font-family: 'Arimo', sans-serif; font-size: 11px; color: #4a6a94; flex-shrink: 0; margin-left: 20px; }}
-  .sec {{ display: flex; align-items: center; gap: 18px; margin: 26px 0 10px; }}
-  .sec h2 {{ font-size: 26px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }}
-  .sec .rule {{ flex: 1; height: 5px; background: var(--rule); max-width: 55%; }}
-  .statline {{ font-family: 'Arimo', Arial, sans-serif; font-size: 12px; font-weight: 700; margin-bottom: 6px; }}
-  table.stats {{ width: 100%; border-collapse: separate; border-spacing: 0; font-family: 'Arimo', Arial, sans-serif;
-    font-size: 13px; border: 1px solid #d7dfe7; border-radius: 6px; overflow: hidden; }}
-  table.stats th {{ font-weight: 700; text-align: right; padding: 8px 9px; background: var(--navy); color: #eaf0f7;
-    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }}
-  table.stats th:first-child {{ text-align: left; }}
-  table.stats td {{ text-align: right; padding: 8px 9px; font-weight: 600; color: #22384e;
-    border-bottom: 1px solid #eef1f5; }}
-  table.stats tr:last-child td {{ border-bottom: none; }}
-  table.stats tr:nth-child(even) td {{ background: #f4f7fa; }}
-  table.stats td:first-child {{ text-align: left; font-weight: 700; color: var(--banner-blue); }}
-  .notes-hint {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-bottom: 6px; }}
-  ul.notes {{ list-style: none; font-size: 18.5px; line-height: 1.65; }}
-  ul.notes li {{ padding-left: 30px; position: relative; margin-bottom: 11px; outline: none; min-height: 1.2em; }}
-  ul.notes li::before {{ content: "\\2756"; position: absolute; left: 4px; color: var(--navy); font-size: 16px; }}
-  ul.notes li:empty::after {{ content: "Click to add note..."; color: #b6c1cc; }}
-  .attribution {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-top: 4px; font-style: italic; }}
-  .footer-block {{ margin-top: 28px; }}
-  .footer-label {{ font-size: 20px; font-weight: 700; letter-spacing: 0.3px; text-decoration: underline;
-    margin-bottom: 6px; outline: none; min-height: 1.2em; }}
-  .footer-label:empty::after {{ content: "Click to add title..."; color: #b6c1cc; text-decoration: none; }}
-  .footer-fill {{ font-family: 'Arimo', sans-serif; font-size: 15px; min-height: 26px; border-bottom: 1px dashed #b9c4cf;
-    padding: 4px 2px; outline: none; }}
-  .footer-fill:empty::after {{ content: "Click to add instructions for Cronin..."; color: #b6c1cc; }}
-  @media print {{
-    body {{ background: #fff; padding: 0; }}
-    .toolbar {{ display: none; }}
-    .page {{ box-shadow: none; width: auto; min-height: auto; padding: 0.25in 0.35in; }}
-    .notes-hint {{ display: none; }}
-    .banner-notes li:empty, ul.notes li:empty {{ display: none; }}
-    .footer-fill:empty::after, .footer-label:empty::after {{ content: ""; }}
-    .banner {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    .sec .rule {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    table.stats {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-  }}
-</style>
-</head>
-<body>
-<div class="toolbar">
-  <button class="secondary" onclick="addNote()">+ Add Note</button>
-  <button onclick="window.print()">Print One Pager</button>
-</div>
-<div class="page">
-  <div class="banner">
-    <div>
-      <h1>{op_player}</h1>
-      <div class="facts">
-        <span class="lbl">Current Team:</span> {op_team}<br>
-        <span class="lbl">Height:</span> {op_height}<br>
-        <span class="lbl">Class:</span> {op_class} &nbsp;&bull;&nbsp; <span class="lbl">Pos:</span> {op_pos}
-      </div>
-      <ul class="banner-notes">{banner_bullets_html}</ul>
+        one_pager_html = f"""
+    <!doctype html><html><head><meta charset="UTF-8">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700;800&family=Arimo:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+      :root {{ --navy: #1b3a5c; --banner-blue: #3a6ea8; --ink: #1b3a5c; --rule: #1b3a5c; --paper: #ffffff; }}
+      * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+      body {{ background: #e8e8e8; font-family: 'Spectral', Georgia, serif; color: var(--ink); padding: 24px 0; }}
+      .toolbar {{ max-width: 8.5in; margin: 0 auto 14px; display: flex; justify-content: flex-end; gap: 8px; padding: 0 8px; }}
+      .toolbar button {{ font-family: 'Arimo', Arial, sans-serif; font-size: 13px; font-weight: 700; padding: 8px 16px;
+        border: none; border-radius: 4px; cursor: pointer; background: var(--navy); color: #fff; }}
+      .toolbar button.secondary {{ background: #6b7c8f; }}
+      .page {{ width: 8.5in; min-height: 11in; margin: 0 auto; background: var(--paper); padding: 0.45in 0.5in 0.5in;
+        box-shadow: 0 2px 14px rgba(0,0,0,0.18); }}
+      .banner {{ background: var(--banner-blue); color: #fff; padding: 22px 26px 20px; display: flex;
+        justify-content: space-between; align-items: flex-start; border-bottom: 3px solid var(--navy); }}
+      .banner h1 {{ font-size: 40px; font-weight: 600; line-height: 1.05; margin-bottom: 10px; letter-spacing: 0.2px; }}
+      .facts {{ font-size: 15.5px; font-weight: 700; line-height: 1.5; }}
+      .facts span.lbl {{ font-weight: 400; opacity: 0.85; }}
+      .banner-notes {{ list-style: none; margin-top: 12px; font-size: 13.5px; font-weight: 400; line-height: 1.4; max-width: 5.4in; }}
+      .banner-notes li {{ padding-left: 20px; position: relative; margin-bottom: 4px; outline: none; }}
+      .banner-notes li::before {{ content: "\\2756"; position: absolute; left: 0; font-size: 10px; opacity: 0.85; }}
+      .banner-notes li:empty::after {{ content: "Click to add profile note..."; opacity: 0.5; }}
+      .headshot {{ width: 130px; height: 130px; border-radius: 6px; background-color: #dce6f2; background-size: cover;
+        background-position: center; display: flex; align-items: center; justify-content: center;
+        font-family: 'Arimo', sans-serif; font-size: 11px; color: #4a6a94; flex-shrink: 0; margin-left: 20px; }}
+      .sec {{ display: flex; align-items: center; gap: 18px; margin: 26px 0 10px; }}
+      .sec h2 {{ font-size: 26px; font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }}
+      .sec .rule {{ flex: 1; height: 5px; background: var(--rule); max-width: 55%; }}
+      .statline {{ font-family: 'Arimo', Arial, sans-serif; font-size: 12px; font-weight: 700; margin-bottom: 6px; }}
+      table.stats {{ width: 100%; border-collapse: separate; border-spacing: 0; font-family: 'Arimo', Arial, sans-serif;
+        font-size: 13px; border: 1px solid #d7dfe7; border-radius: 6px; overflow: hidden; }}
+      table.stats th {{ font-weight: 700; text-align: right; padding: 8px 9px; background: var(--navy); color: #eaf0f7;
+        font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }}
+      table.stats th:first-child {{ text-align: left; }}
+      table.stats td {{ text-align: right; padding: 8px 9px; font-weight: 600; color: #22384e;
+        border-bottom: 1px solid #eef1f5; }}
+      table.stats tr:last-child td {{ border-bottom: none; }}
+      table.stats tr:nth-child(even) td {{ background: #f4f7fa; }}
+      table.stats td:first-child {{ text-align: left; font-weight: 700; color: var(--banner-blue); }}
+      .notes-hint {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-bottom: 6px; }}
+      ul.notes {{ list-style: none; font-size: 18.5px; line-height: 1.65; }}
+      ul.notes li {{ padding-left: 30px; position: relative; margin-bottom: 11px; outline: none; min-height: 1.2em; }}
+      ul.notes li::before {{ content: "\\2756"; position: absolute; left: 4px; color: var(--navy); font-size: 16px; }}
+      ul.notes li:empty::after {{ content: "Click to add note..."; color: #b6c1cc; }}
+      .attribution {{ font-family: 'Arimo', sans-serif; font-size: 11px; color: #8494a5; margin-top: 4px; font-style: italic; }}
+      .footer-block {{ margin-top: 28px; }}
+      .footer-label {{ font-size: 20px; font-weight: 700; letter-spacing: 0.3px; text-decoration: underline;
+        margin-bottom: 6px; outline: none; min-height: 1.2em; }}
+      .footer-label:empty::after {{ content: "Click to add title..."; color: #b6c1cc; text-decoration: none; }}
+      .footer-fill {{ font-family: 'Arimo', sans-serif; font-size: 15px; min-height: 26px; border-bottom: 1px dashed #b9c4cf;
+        padding: 4px 2px; outline: none; }}
+      .footer-fill:empty::after {{ content: "Click to add instructions for Cronin..."; color: #b6c1cc; }}
+      @media print {{
+        body {{ background: #fff; padding: 0; }}
+        .toolbar {{ display: none; }}
+        .page {{ box-shadow: none; width: auto; min-height: auto; padding: 0.25in 0.35in; }}
+        .notes-hint {{ display: none; }}
+        .banner-notes li:empty, ul.notes li:empty {{ display: none; }}
+        .footer-fill:empty::after, .footer-label:empty::after {{ content: ""; }}
+        .banner {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        .sec .rule {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        table.stats {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+      }}
+    </style>
+    </head>
+    <body>
+    <div class="toolbar">
+      <button class="secondary" onclick="addNote()">+ Add Note</button>
+      <button onclick="window.print()">Print One Pager</button>
     </div>
-    <div class="headshot" style="{photo_style}"></div>
-  </div>
+    <div class="page">
+      <div class="banner">
+        <div>
+          <h1>{op_player}</h1>
+          <div class="facts">
+            <span class="lbl">Current Team:</span> {op_team}<br>
+            <span class="lbl">Height:</span> {op_height}<br>
+            <span class="lbl">Class:</span> {op_class} &nbsp;&bull;&nbsp; <span class="lbl">Pos:</span> {op_pos}<br>
+            <span class="lbl">Agent:</span> {op_agent}
+          </div>
+          <ul class="banner-notes">{banner_bullets_html}</ul>
+        </div>
+        <div class="headshot" style="{photo_style}"></div>
+      </div>
 
-  <div class="sec"><h2>STATS</h2><div class="rule"></div></div>
-  <div class="statline">{op_player} &bull; {op_pos} &bull; {op_height} &bull; {op_class}</div>
-  {stats_table_html}
+      <div class="sec"><h2>STATS</h2><div class="rule"></div></div>
+      <div class="statline">{op_player} &bull; {op_pos} &bull; {op_height} &bull; {op_class}</div>
+      {stats_table_html}
 
-  <div class="sec"><h2>STAFF NOTES</h2><div class="rule"></div></div>
-  <div class="notes-hint">Assistants: click any bullet to type. Use + Add Note for more lines. Empty bullets are hidden when printed.</div>
-  <ul class="notes" id="notesList">{staff_notes_html}</ul>
-  <div class="attribution" contenteditable="true">Notes by: {op_scout}</div>
+      <div class="sec"><h2>STAFF NOTES</h2><div class="rule"></div></div>
+      <div class="notes-hint">Assistants: click any bullet to type. Use + Add Note for more lines. Empty bullets are hidden when printed.</div>
+      <ul class="notes" id="notesList">{staff_notes_html}</ul>
+      <div class="attribution" contenteditable="true">Notes by: {op_scout}</div>
 
-  <div class="footer-block">
-    <div class="footer-label" contenteditable="true"></div>
-    <div class="footer-fill" contenteditable="true"></div>
-  </div>
-  <div class="footer-block">
-    <div class="footer-label" contenteditable="true"></div>
-    <div class="footer-fill" contenteditable="true"></div>
-  </div>
-</div>
-<script>
-  function addNote() {{
-    const li = document.createElement('li');
-    li.contentEditable = 'true';
-    document.getElementById('notesList').appendChild(li);
-    li.focus();
-  }}
-</script>
-</body>
-</html>
-"""
-    components.html(one_pager_html, height=1450, scrolling=True)
+      <div class="footer-block">
+        <div class="footer-label" contenteditable="true"></div>
+        <div class="footer-fill" contenteditable="true"></div>
+      </div>
+      <div class="footer-block">
+        <div class="footer-label" contenteditable="true"></div>
+        <div class="footer-fill" contenteditable="true"></div>
+      </div>
+    </div>
+    <script>
+      function addNote() {{
+        const li = document.createElement('li');
+        li.contentEditable = 'true';
+        document.getElementById('notesList').appendChild(li);
+        li.focus();
+      }}
+    </script>
+    </body>
+    </html>
+    """
+        components.html(one_pager_html, height=1450, scrolling=True)
 
 
-# ==========================================
-# TAB 2: PORTAL DISCOVERY ENGINE
+    # ==========================================
+    # TAB 2: PORTAL DISCOVERY ENGINE
 # ==========================================
 with tab2:
     st.subheader("Database Sifting & Portal Filtering")
@@ -3600,7 +3668,7 @@ with tab2:
     # column_config instead of mutating the underlying data used for filtering/sorting above.
     _pct_cols = {"USG", "EFG", "TS", "AST", "OR", "DR", "BLK", "STL", "FTR", "FT_PCT",
                  "TWO_P", "THREE_P", "THREE_P_100", "MIN_PCT"}
-    _decimal_cols = {"PPG", "PRPG", "BPM", "OBPM", "DBPM", "SOS", "RPG", "APG", "TO", "MPG"}
+    _decimal_cols = {"PPG", "PRPG", "BPM", "OBPM", "DBPM", "SOS", "RPG", "APG", "TO"}
     _discovery_col_config = {
         "PLAYER": st.column_config.TextColumn("Player", pinned=True),
         "TEAM": st.column_config.TextColumn("Team"),
@@ -3631,6 +3699,7 @@ with tab2:
         on_select=_on_portal_row_click,
         selection_mode="single-row",
         height=650,
+        use_container_width=True,
         column_config=_discovery_col_config,
         key="discovery_df_select",
     )
@@ -3825,10 +3894,36 @@ with tab_synergy:
         except Exception:
             return []
 
+    @st.cache_data(ttl=3600)
+    def _load_synergy_events(player_name):
+        try:
+            c = sqlite3.connect("scouting_hub.db")
+            rows = c.execute(
+                "SELECT shot_x, shot_y, play_tags, game_quarter, d_player_name, "
+                "zone, short_clock, pick_and_roll, is_home "
+                "FROM synergy_events WHERE player_name=?", (player_name,)
+            ).fetchall()
+            c.close()
+            import json as _json
+            result = []
+            for x, y, tags_str, qtr, defender, zone, sc, pnr, home in rows:
+                tags = _json.loads(tags_str) if tags_str else []
+                made = "Make2Pts" in tags or "Make3Pts" in tags or "Make2PtsFoul" in tags or "Make3PtsFoul" in tags
+                is3 = "Make3Pts" in tags or "Miss3Pts" in tags or "Make3PtsFoul" in tags
+                is_shot = any(t in tags for t in ["Make2Pts","Miss2Pts","Make3Pts","Miss3Pts","Make2PtsFoul","Make3PtsFoul"])
+                result.append({
+                    "x": x, "y": y, "tags": tags, "made": made, "is3": is3,
+                    "is_shot": is_shot, "qtr": qtr, "defender": defender,
+                    "zone": zone, "short_clock": sc, "pnr": pnr, "home": home,
+                })
+            return result
+        except Exception:
+            return []
+
     _syn_players = _synergy_player_list()
 
     if not _syn_players:
-        st.info("Run build_synergy.py to populate play type data.")
+        st.info("Synergy play type data coming soon.")
     else:
         _syn_default = "Paolo Banchero" if "Paolo Banchero" in _syn_players else _syn_players[0]
         _syn_idx = _syn_players.index(_syn_default)
@@ -3858,60 +3953,352 @@ with tab_synergy:
                 key="synergy_pos_select"
             )
 
+        _syn_events = _load_synergy_events(_syn_selected)
+
+        # ── SECTION: Play Types ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Play Type Breakdown")
         _synergy_rows = get_synergy_playtype_rows(_syn_selected, _syn_pos)
+        if True:
 
-        if _synergy_rows:
-            st.caption(f"Percentiles vs. all {_syn_pos}s · 2021-22 NCAAMB")
+            if _synergy_rows:
+                st.caption(f"Percentiles vs. all {_syn_pos}s · 2021-22 NCAAMB")
 
-            def _playtype_block_tab(pt_label, time_pct, stat_rows):
-                time_str = f"{time_pct * 100:.1f}% of poss" if time_pct is not None else ""
-                header = (
-                    f"<div style='font-size:1.0rem;font-weight:900;text-transform:uppercase;"
-                    f"letter-spacing:0.06em;color:#111;border-bottom:2px solid #ddd;"
-                    f"padding-bottom:3px;margin-bottom:6px'>"
-                    f"{pt_label}"
-                    f"<span style='font-size:0.72rem;font-weight:400;color:#666;margin-left:8px'>{time_str}</span>"
-                    f"</div>"
-                )
-                rows_html = []
-                for sl, v, p, sfx, d in stat_rows:
-                    bg, bubble_fg = pct_color(p)
-                    disp = f"{v:.{d}f}" if v is not None else "—"
-                    val_str = f"{disp}{sfx}" if disp != "—" else "—"
-                    if p is not None:
-                        fill_w = f"{p:.1f}%"
-                        bubble = (
-                            f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);"
-                            f"background:{bg};color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;"
-                            f"width:20px;height:20px;display:flex;align-items:center;justify-content:center;"
-                            f"z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{p:.0f}</div>"
-                        )
-                        fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
-                    else:
-                        fill = bubble = ""
-                    rows_html.append(
-                        f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
-                        f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:72px;text-align:right;flex-shrink:0'>{sl}</span>"
-                        f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
-                        f"{fill}{bubble}</div>"
-                        f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
+                def _playtype_block_tab(pt_label, time_pct, stat_rows):
+                    time_str = f"{time_pct * 100:.1f}% of poss" if time_pct is not None else ""
+                    header = (
+                        f"<div style='font-size:1.0rem;font-weight:900;text-transform:uppercase;"
+                        f"letter-spacing:0.06em;color:#111;border-bottom:2px solid #ddd;"
+                        f"padding-bottom:3px;margin-bottom:6px'>"
+                        f"{pt_label}"
+                        f"<span style='font-size:0.72rem;font-weight:400;color:#666;margin-left:8px'>{time_str}</span>"
                         f"</div>"
                     )
-                return f"<div style='margin-bottom:18px'>{header}{''.join(rows_html)}</div>"
+                    rows_html = []
+                    for sl, v, p, sfx, d in stat_rows:
+                        bg, bubble_fg = pct_color(p)
+                        disp = f"{v:.{d}f}" if v is not None else "—"
+                        val_str = f"{disp}{sfx}" if disp != "—" else "—"
+                        if p is not None:
+                            fill_w = f"{p:.1f}%"
+                            bubble = (
+                                f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);"
+                                f"background:{bg};color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;"
+                                f"width:20px;height:20px;display:flex;align-items:center;justify-content:center;"
+                                f"z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{p:.0f}</div>"
+                            )
+                            fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
+                        else:
+                            fill = bubble = ""
+                        rows_html.append(
+                            f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
+                            f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:72px;text-align:right;flex-shrink:0'>{sl}</span>"
+                            f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
+                            f"{fill}{bubble}</div>"
+                            f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
+                            f"</div>"
+                        )
+                    return f"<div style='margin-bottom:18px'>{header}{''.join(rows_html)}</div>"
 
-            _synergy_rows_sorted = sorted(_synergy_rows, key=lambda r: r[1] or 0, reverse=True)
-            half = math.ceil(len(_synergy_rows_sorted) / 2)
+                _synergy_rows_sorted = sorted(_synergy_rows, key=lambda r: r[1] or 0, reverse=True)
+                half = math.ceil(len(_synergy_rows_sorted) / 2)
 
-            _pt_left, _pt_right = st.columns(2)
-            with _pt_left:
-                st.markdown(
-                    "".join(_playtype_block_tab(*r) for r in _synergy_rows_sorted[:half]),
-                    unsafe_allow_html=True
+                _pt_left, _pt_right = st.columns(2)
+                with _pt_left:
+                    st.markdown(
+                        "".join(_playtype_block_tab(*r) for r in _synergy_rows_sorted[:half]),
+                        unsafe_allow_html=True
+                    )
+                with _pt_right:
+                    st.markdown(
+                        "".join(_playtype_block_tab(*r) for r in _synergy_rows_sorted[half:]),
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.info(f"No Synergy play type data found for {_syn_selected}.")
+
+        # ── VIEW: Shot Chart ───────────────────────────────────────────────
+        # ── SECTION: Shot Chart ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Shot Chart")
+        if True:
+            _shot_evts = [e for e in _syn_events if e["is_shot"]]
+            if not _shot_evts:
+                st.info("No shot data found.")
+            else:
+                _sc_col1, _sc_col2 = st.columns([3, 1])
+                with _sc_col2:
+                    _pt_filter_opts = ["All"] + list({
+                        t for e in _shot_evts for t in e["tags"]
+                        if t in ["PandRBallHandler","Iso","PostUp","SpotUp","Cut","OffScreen","HandOff","Transition","PandRRollMan","Post_Up","Spot_Up"]
+                    })
+                    _pt_filter_map = {
+                        "PandRBallHandler": "P&R Ball Handler", "Iso": "Isolation", "ISO": "Isolation",
+                        "PostUp": "Post Up", "Post_Up": "Post Up", "SpotUp": "Spot Up", "Spot_Up": "Spot Up",
+                        "Cut": "Cut", "OffScreen": "Off Screen", "HandOff": "Hand Off",
+                        "Transition": "Transition", "PandRRollMan": "P&R Roll Man",
+                    }
+                    _pt_filter = st.selectbox("Play type:", ["All"] + sorted({
+                        _pt_filter_map.get(t, t) for t in _pt_filter_opts if t != "All"
+                    }), key="syn_shot_pt_filter")
+                    _coverage_filter = st.radio("Coverage:", ["All", "Open", "Guarded", "Defense Commits"], key="syn_cov_filter")
+                    _show_made = st.checkbox("Made", value=True, key="syn_show_made")
+                    _show_miss = st.checkbox("Missed", value=True, key="syn_show_miss")
+
+                _reverse_pt_map = {v: k for k, v in _pt_filter_map.items()}
+                _pt_keys = [_reverse_pt_map.get(_pt_filter, _pt_filter)] if _pt_filter != "All" else None
+                _cov_map = {"Open": "Open", "Guarded": "Guarded", "Defense Commits": "DefenseCommits"}
+
+                _filtered = []
+                for e in _shot_evts:
+                    if _pt_keys and not any(k in e["tags"] for k in _pt_keys + [_pt_filter]):
+                        continue
+                    if _coverage_filter != "All" and _cov_map[_coverage_filter] not in e["tags"]:
+                        continue
+                    if e["made"] and not _show_made:
+                        continue
+                    if not e["made"] and not _show_miss:
+                        continue
+                    _filtered.append(e)
+
+                with _sc_col1:
+                    _fig_sc, _ax_sc = plt.subplots(figsize=(6, 5))
+                    _ax_sc.set_facecolor("#f8f8f8")
+                    _fig_sc.patch.set_facecolor("#f8f8f8")
+                    _draw_half_court(_ax_sc)
+
+                    for e in _filtered:
+                        if e["x"] is None or e["y"] is None:
+                            continue
+                        # Synergy coords: origin at center, y positive toward basket
+                        # Convert: x in [-250,250] (tenths of feet from center), y in [-36,458]
+                        px = e["x"] / 10.0 + 25.0   # shift to 0-50 ft
+                        py = e["y"] / 10.0 + 5.25   # shift so basket = 5.25
+                        if py < 0 or py > 47:
+                            continue
+                        color = "#FFD100" if e["made"] else "#2774AE"
+                        marker = "o" if not e["is3"] else "^"
+                        _ax_sc.scatter(px, py, c=color, s=18, alpha=0.7,
+                                       marker=marker, linewidths=0.3, edgecolors="white", zorder=3)
+
+                    total = len(_filtered)
+                    made_count = sum(1 for e in _filtered if e["made"])
+                    fg_pct = made_count / total * 100 if total else 0
+                    _ax_sc.set_xlim(0, 50)
+                    _ax_sc.set_ylim(0, 47)
+                    _ax_sc.axis("off")
+                    _ax_sc.set_title(
+                        f"{_syn_selected} · {_pt_filter} · {total} shots · {fg_pct:.1f}% FG",
+                        fontsize=9, fontweight="bold", pad=6
+                    )
+                    from matplotlib.lines import Line2D
+                    legend_els = [
+                        Line2D([0],[0], marker='o', color='w', markerfacecolor='#FFD100', markersize=7, label='Made 2pt'),
+                        Line2D([0],[0], marker='^', color='w', markerfacecolor='#FFD100', markersize=7, label='Made 3pt'),
+                        Line2D([0],[0], marker='o', color='w', markerfacecolor='#2774AE', markersize=7, label='Miss 2pt'),
+                        Line2D([0],[0], marker='^', color='w', markerfacecolor='#2774AE', markersize=7, label='Miss 3pt'),
+                    ]
+                    _ax_sc.legend(handles=legend_els, loc="upper right", fontsize=6, framealpha=0.8)
+                    st.pyplot(_fig_sc, use_container_width=True)
+                    plt.close(_fig_sc)
+
+                    # Shot zone frequency table
+                    _zone_map = [
+                        ("At Basket", "AtBasket"),
+                        ("Short (<4ft)", "Short"),
+                        ("Mid (4-17ft)", "Shortto17"),
+                        ("Mid-Long (17ft-3pt)", "Medium17to3pt"),
+                        ("Long 3pt", "Long3pt"),
+                        ("Deep 3pt", "Long"),
+                    ]
+                    _zone_rows = []
+                    for zlabel, ztag in _zone_map:
+                        ze = [e for e in _filtered if ztag in e["tags"]]
+                        if not ze:
+                            continue
+                        zm = sum(1 for e in ze if e["made"])
+                        _zone_rows.append({
+                            "Zone": zlabel,
+                            "Att": len(ze),
+                            "Freq%": f"{len(ze)/total*100:.1f}%" if total else "—",
+                            "FG%": f"{zm/len(ze)*100:.1f}%",
+                        })
+                    if _zone_rows:
+                        st.caption("Shot zone breakdown")
+                        st.dataframe(pd.DataFrame(_zone_rows), hide_index=True, use_container_width=True)
+
+        # ── VIEW: Tendencies ───────────────────────────────────────────────
+        # ── SECTION: Tendencies ────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Tendencies")
+        if True:
+            if not _syn_events:
+                st.info("No event data found.")
+            else:
+                _tend_col1, _tend_col2 = st.columns(2)
+
+                with _tend_col1:
+                    # Drive directions
+                    st.markdown("**Drive Direction**")
+                    _drive_tags = [("Left", "DrivesLeft"), ("Right", "DrivesRight"),
+                                   ("Straight", "DrivesStraight"), ("Baseline", "DriveBaseline"),
+                                   ("Middle", "DriveMiddle")]
+                    _drive_data = []
+                    for label, tag in _drive_tags:
+                        count = sum(1 for e in _syn_events if tag in e["tags"])
+                        if count:
+                            _shot_w_tag = [e for e in _syn_events if tag in e["tags"] and e["is_shot"]]
+                            _made_w_tag = sum(1 for e in _shot_w_tag if e["made"])
+                            _drive_data.append({
+                                "Direction": label, "Poss": count,
+                                "FG%": f"{_made_w_tag/_shot_w_tag.__len__()*100:.1f}%" if _shot_w_tag else "—"
+                            })
+                    if _drive_data:
+                        _total_drives = sum(d["Poss"] for d in _drive_data)
+                        for d in _drive_data:
+                            d["Freq%"] = f"{d['Poss']/_total_drives*100:.1f}%"
+                        st.dataframe(pd.DataFrame(_drive_data)[["Direction","Poss","Freq%","FG%"]],
+                                     hide_index=True, use_container_width=True)
+
+                    # P&R tendencies
+                    st.markdown("**P&R Tendencies**")
+                    _pnr_tags = [("High P&R", "HighPandR"), ("Left P&R", "LeftPandR"),
+                                 ("Right P&R", "RightPandR"), ("Slips Pick", "SlipsthePick"),
+                                 ("Pick & Pop", "PickandPops"), ("Rolls to Basket", "RollstoBasket"),
+                                 ("Goes Away", "GoAwayfromPick"), ("Dribble Off Pick", "DribbleOffPick")]
+                    _pnr_data = []
+                    for label, tag in _pnr_tags:
+                        count = sum(1 for e in _syn_events if tag in e["tags"])
+                        if count:
+                            _s = [e for e in _syn_events if tag in e["tags"] and e["is_shot"]]
+                            _m = sum(1 for e in _s if e["made"])
+                            _pnr_data.append({
+                                "Action": label, "Poss": count,
+                                "FG%": f"{_m/len(_s)*100:.1f}%" if _s else "—"
+                            })
+                    if _pnr_data:
+                        st.dataframe(pd.DataFrame(_pnr_data), hide_index=True, use_container_width=True)
+
+                with _tend_col2:
+                    # Coverage breakdown
+                    st.markdown("**Coverage**")
+                    _cov_tags = [("Open", "Open"), ("Guarded", "Guarded"), ("Defense Commits", "DefenseCommits")]
+                    _cov_data = []
+                    for label, tag in _cov_tags:
+                        evts = [e for e in _syn_events if tag in e["tags"] and e["is_shot"]]
+                        if evts:
+                            made = sum(1 for e in evts if e["made"])
+                            _cov_data.append({
+                                "Coverage": label, "Shots": len(evts),
+                                "FG%": f"{made/len(evts)*100:.1f}%"
+                            })
+                    if _cov_data:
+                        total_cov = sum(d["Shots"] for d in _cov_data)
+                        for d in _cov_data:
+                            d["Freq%"] = f"{d['Shots']/total_cov*100:.1f}%"
+                        st.dataframe(pd.DataFrame(_cov_data)[["Coverage","Shots","Freq%","FG%"]],
+                                     hide_index=True, use_container_width=True)
+
+                    # Post-up sub-tendencies
+                    st.markdown("**Post Location**")
+                    _post_tags = [("Left Block", "LeftBlock"), ("Right Block", "RightBlock"),
+                                  ("Left Shoulder", "LeftShoulder"), ("Right Shoulder", "RightShoulder"),
+                                  ("Left Wing", "LeftWing"), ("Right Wing", "RightWing")]
+                    _post_data = []
+                    for label, tag in _post_tags:
+                        evts = [e for e in _syn_events if tag in e["tags"] and e["is_shot"]]
+                        if evts:
+                            made = sum(1 for e in evts if e["made"])
+                            _post_data.append({
+                                "Location": label, "Shots": len(evts),
+                                "FG%": f"{made/len(evts)*100:.1f}%"
+                            })
+                    if _post_data:
+                        st.dataframe(pd.DataFrame(_post_data), hide_index=True, use_container_width=True)
+
+                    # Shot creation
+                    st.markdown("**Shot Creation**")
+                    _create_tags = [("Off Dribble", "DribbleJumper"), ("Catch & Shoot", "NoDribbleJumper"),
+                                    ("Dribble Move", "DribbleMove"), ("From Stationary", "FromStationary"),
+                                    ("Early Jumper", "EarlyJumper"), ("Transition Leak", "LeakOuts"),
+                                    ("Trailer", "Trailer")]
+                    _create_data = []
+                    for label, tag in _create_tags:
+                        evts = [e for e in _syn_events if tag in e["tags"] and e["is_shot"]]
+                        if evts:
+                            made = sum(1 for e in evts if e["made"])
+                            _create_data.append({
+                                "Type": label, "Shots": len(evts),
+                                "FG%": f"{made/len(evts)*100:.1f}%"
+                            })
+                    if _create_data:
+                        st.dataframe(pd.DataFrame(_create_data), hide_index=True, use_container_width=True)
+
+                # Situational
+                st.markdown("**Situational**")
+                _sit_col1, _sit_col2, _sit_col3, _sit_col4 = st.columns(4)
+                _sit_checks = [
+                    ("vs Zone", "zone"), ("Short Clock", "short_clock"),
+                ]
+                for (label, key), col in zip(_sit_checks, [_sit_col1, _sit_col2]):
+                    evts = [e for e in _syn_events if e[key] and e["is_shot"]]
+                    total = len(evts)
+                    made = sum(1 for e in evts if e["made"])
+                    with col:
+                        st.metric(label, f"{made/total*100:.1f}% FG" if total else "—",
+                                  delta=f"{total} shots", delta_color="off")
+
+                # Transition breakdown
+                st.markdown("**Transition Sub-Types**")
+                _trans_tags = [("Leak Out", "LeakOuts"), ("Trailer", "Trailer"),
+                               ("Early Jumper", "EarlyJumper"), ("Takes Early Jumper", "TakesEarlyJumpShot")]
+                _trans_data = []
+                for label, tag in _trans_tags:
+                    evts = [e for e in _syn_events if tag in e["tags"] and e["is_shot"]]
+                    if evts:
+                        made = sum(1 for e in evts if e["made"])
+                        _trans_data.append({"Role": label, "Shots": len(evts),
+                                            "FG%": f"{made/len(evts)*100:.1f}%"})
+                if _trans_data:
+                    st.dataframe(pd.DataFrame(_trans_data), hide_index=True, use_container_width=False)
+                else:
+                    st.caption("No transition sub-type data.")
+
+        # ── VIEW: Matchup Defense ──────────────────────────────────────────
+        # ── SECTION: Matchup Defense ───────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Matchup Defense")
+        if True:
+            st.caption("Players who defended this player — PPP allowed, shots faced")
+            _def_evts = [e for e in _syn_events if e["defender"] and e["is_shot"]]
+            if not _def_evts:
+                st.info("No defensive matchup data found.")
+            else:
+                from collections import defaultdict
+                _def_stats = defaultdict(lambda: {"shots": 0, "made": 0, "pts": 0})
+                for e in _def_evts:
+                    d = e["defender"]
+                    _def_stats[d]["shots"] += 1
+                    if e["made"]:
+                        _def_stats[d]["made"] += 1
+                        _def_stats[d]["pts"] += 3 if e["is3"] else 2
+                _def_rows = []
+                for defender, s in _def_stats.items():
+                    if s["shots"] < 2:
+                        continue
+                    _def_rows.append({
+                        "Defender": defender,
+                        "Shots Faced": s["shots"],
+                        "FG%": round(s["made"] / s["shots"] * 100, 1),
+                        "PPP Allowed": round(s["pts"] / s["shots"], 3),
+                    })
+                _def_rows.sort(key=lambda x: x["Shots Faced"], reverse=True)
+                st.dataframe(
+                    pd.DataFrame(_def_rows),
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "FG%": st.column_config.NumberColumn("FG%", format="%.1f%%"),
+                        "PPP Allowed": st.column_config.NumberColumn("PPP Allowed", format="%.3f"),
+                    }
                 )
-            with _pt_right:
-                st.markdown(
-                    "".join(_playtype_block_tab(*r) for r in _synergy_rows_sorted[half:]),
-                    unsafe_allow_html=True
-                )
-        else:
-            st.info(f"No Synergy play type data found for {_syn_selected}.")
