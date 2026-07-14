@@ -10,6 +10,7 @@ import ssl
 import urllib3
 import time
 import bisect
+import unicodedata
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -420,6 +421,40 @@ def build_team_conf_map(df_all: pd.DataFrame) -> dict:
         return dict(zip(rankings["espn_id"].astype(str), rankings["CONF"]))
     except Exception:
         return {}
+
+
+def _normalize_player_name(name: str) -> str:
+    """Collapse the small formatting differences between BartTorvik's player names and the
+    names in our locally-scraped game logs / shot chart (e.g. 'A.J. Staton-McCray' vs
+    'AJ Staton-McCray', 'Bukumirović' vs 'Bukumirovic', 'Labaron Philon' vs 'Labaron Philon Jr.')
+    so the two can still be joined by an exact-match lookup."""
+    if not name:
+        return ""
+    n = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode("ascii")
+    n = n.replace(".", "").lower().strip()
+    for suffix in (" jr", " sr", " ii", " iii", " iv"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+    return re.sub(r"\s+", " ", n).strip()
+
+
+@st.cache_data(ttl=3600)
+def build_game_log_name_map() -> dict:
+    """{normalized_name: actual player_game_logs PLAYER string} — lets a BartTorvik name
+    resolve to whatever spelling the locally-scraped game logs / shot chart use."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        names = pd.read_sql_query("SELECT DISTINCT player_name FROM player_game_logs", conn)["player_name"]
+        conn.close()
+        return {_normalize_player_name(n): n for n in names}
+    except Exception:
+        return {}
+
+
+def resolve_game_log_name(bart_name: str) -> str:
+    """Best-effort resolve a BartTorvik player name to its game-log/shot-chart spelling.
+    Falls back to the original name unchanged if no normalized match is found."""
+    return build_game_log_name_map().get(_normalize_player_name(bart_name), bart_name)
 
 
 @st.cache_data(ttl=3600)
@@ -1112,13 +1147,37 @@ def build_team_strength() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=3600)
+def build_team_context() -> pd.DataFrame:
+    """Team pace/offense/defense identity (KenPom AdjO/AdjD/AdjTempo) per BartTorvik team
+    name — powers the Player Card's Team Context tile and the comp cards' identity tag.
+    kenpom_team_rankings.kp_name already matches BartTorvik naming directly (verified
+    306/310 exact string matches against team_rankings.bart_name), so no espn_id join
+    is needed here — kenpom_team_rankings.espn_id is unreliable for a subset of mid-major
+    schools and must not be used to key this lookup."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query(
+            "SELECT kp_name AS TEAM, adj_o AS TEAM_ADJ_O, adj_d AS TEAM_ADJ_D, "
+            "adj_tempo AS TEAM_TEMPO FROM kenpom_team_rankings", conn
+        )
+        conn.close()
+        return df.dropna(subset=["TEAM"])
+    except Exception:
+        return pd.DataFrame()
+
+
 def add_derived_comp_stats(df_all: pd.DataFrame) -> pd.DataFrame:
-    """df_all + shot-zone profile, team-strength (AdjEM), and AST/TO ratio — the extra
-    signals the comp finder (and the card's percentile tiles) weigh in beyond raw box stats."""
+    """df_all + shot-zone profile, team-strength (AdjEM), team context (pace/off/def), and
+    AST/TO ratio — the extra signals the comp finder (and the card's percentile tiles)
+    weigh in beyond raw box stats."""
     d = merge_shot_zones(df_all.copy())
     strength = build_team_strength()
     if not strength.empty:
         d = d.merge(strength, on="TEAM", how="left")
+    context = build_team_context()
+    if not context.empty:
+        d = d.merge(context, on="TEAM", how="left")
     if "AST" in d.columns and "TO" in d.columns:
         d["AST_TO"] = d.apply(lambda r: (r["AST"] / r["TO"]) if r["TO"] else None, axis=1)
     return d
@@ -1128,8 +1187,8 @@ def add_derived_comp_stats(df_all: pd.DataFrame) -> pd.DataFrame:
 NATIONAL_PCT_STATS = ["PRPG", "BPM", "OBPM", "DBPM", "ORTG", "USG", "EFG", "TS",
                        "TWO_P", "THREE_P", "FTR", "FT_PCT", "AST", "TO", "OR", "DR",
                        "BLK", "STL", "MIN_PCT"]
-NATIONAL_LOWER_IS_BETTER = {"TO"}
-DERIVED_PCT_STATS = ["AST_TO", "TEAM_ADJ_EM"] + SHOT_ZONE_STATS
+NATIONAL_LOWER_IS_BETTER = {"TO", "TEAM_ADJ_D"}
+DERIVED_PCT_STATS = ["AST_TO", "TEAM_ADJ_EM", "TEAM_ADJ_O", "TEAM_ADJ_D", "TEAM_TEMPO"] + SHOT_ZONE_STATS
 
 
 @st.cache_data(ttl=3600)
@@ -2421,6 +2480,10 @@ with tab_card:
 
     current_player = st.session_state.active_player
     p_data = df_all[df_all["PLAYER"] == current_player].iloc[0]
+    # BartTorvik's name for this player doesn't always match our locally-scraped game
+    # logs/shot chart spelling (accents, "Jr." suffixes, periods in initials) — resolve
+    # once here and use this for every game-log/shot-chart lookup below.
+    gl_player = resolve_game_log_name(current_player)
 
     conn = sqlite3.connect('scouting_hub.db')
     cursor = conn.cursor()
@@ -2466,7 +2529,7 @@ with tab_card:
             _gl_conn = sqlite3.connect("scouting_hub.db")
             _tid_row = _gl_conn.execute(
                 "SELECT team_espn_id FROM player_game_logs WHERE player_name = ? AND team_espn_id IS NOT NULL LIMIT 1",
-                (current_player,)
+                (gl_player,)
             ).fetchone()
             _gl_conn.close()
             if _tid_row:
@@ -2504,7 +2567,7 @@ with tab_card:
 
     # Pull boxscore stats for header + stat grid
     _hdr_box = load_consistent_boxscore_stats()
-    _hdr_row = _hdr_box[_hdr_box["PLAYER"] == current_player]
+    _hdr_row = _hdr_box[_hdr_box["PLAYER"] == gl_player]
     if len(_hdr_row) > 1:
         _team_match = _hdr_row[_hdr_row["TEAM"].str.contains(str(p_data["TEAM"]), case=False, na=False)]
         if not _team_match.empty:
@@ -2678,11 +2741,11 @@ with tab_card:
         _conf_row = _non_conf_row = None
         if _in_conf_ids:
             _conf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids)
-            _cr = _conf_box[_conf_box["PLAYER"] == current_player]
+            _cr = _conf_box[_conf_box["PLAYER"] == gl_player]
             _conf_row = _cr.iloc[0] if not _cr.empty else None
 
             _nonconf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids, exclude_conf_ids=True)
-            _ncr = _nonconf_box[_nonconf_box["PLAYER"] == current_player]
+            _ncr = _nonconf_box[_nonconf_box["PLAYER"] == gl_player]
             _non_conf_row = _ncr.iloc[0] if not _ncr.empty else None
 
         _stats_rows_html = _stats_table_row("Season", _hdr)
@@ -2770,12 +2833,27 @@ with tab_card:
             _stat_row_colored("BPG",   _hdr.get("BPG"),     _box_pct("BPG",     _hdr.get("BPG"))),
         ])
 
+        # Team pace/offense/defense context (KenPom) — not position-benchmarked, just a
+        # straight national percentile among all teams, so this is deliberately not routed
+        # through _bt_pct's position-filtered lookup.
+        _team_ctx_df = build_team_context()
+        _team_ctx_row = _team_ctx_df[_team_ctx_df["TEAM"] == p_data["TEAM"]]
+        _team_ctx = _team_ctx_row.iloc[0] if not _team_ctx_row.empty else None
+
+        team_html = ""
+        if _team_ctx is not None:
+            team_html = _cat_table("Team Context", [
+                _stat_row_colored("Tempo",    _team_ctx.get("TEAM_TEMPO"), national_pct("TEAM_TEMPO", _team_ctx.get("TEAM_TEMPO"), card_benchmarks)),
+                _stat_row_colored("Team Off", _team_ctx.get("TEAM_ADJ_O"), national_pct("TEAM_ADJ_O", _team_ctx.get("TEAM_ADJ_O"), card_benchmarks)),
+                _stat_row_colored("Team Def", _team_ctx.get("TEAM_ADJ_D"), national_pct("TEAM_ADJ_D", _team_ctx.get("TEAM_ADJ_D"), card_benchmarks)),
+            ])
+
         st.caption(f"Percentiles vs. all {_player_pos_group}s nationally")
         col_left, col_right = st.columns(2)
         with col_left:
             st.markdown(eff_html + shoot_html + play_html, unsafe_allow_html=True)
         with col_right:
-            st.markdown(imp_html + reb_html + def_html, unsafe_allow_html=True)
+            st.markdown(imp_html + reb_html + def_html + team_html, unsafe_allow_html=True)
 
     curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
 
@@ -2795,7 +2873,7 @@ with tab_card:
         st.info("Run `python3 build_game_logs.py` to enable the shot chart.")
     else:
         _box_df = load_consistent_boxscore_stats(_max_rank)
-        _pbox = _box_df[_box_df["PLAYER"] == current_player]
+        _pbox = _box_df[_box_df["PLAYER"] == gl_player]
         if len(_pbox) > 1:
             _bt_team = p_data["TEAM"]
             _team_match = _pbox[_pbox["TEAM"].str.contains(_bt_team, case=False, na=False)]
@@ -2804,7 +2882,7 @@ with tab_card:
 
         # Shot chart section — use matched team_espn_id to avoid name collisions
         _team_id = _pbox.iloc[0]["team_espn_id"] if not _pbox.empty and "team_espn_id" in _pbox.columns else None
-        _shots = load_player_shots(current_player, _team_id)
+        _shots = load_player_shots(gl_player, _team_id)
         if not _shots.empty:
             st.write("**Shot Chart**")
             _chart_title = f"{current_player}  ·  {_split}"
@@ -2900,6 +2978,22 @@ with tab_card:
                     "</div>"
                 )
 
+            def _team_identity_tag(row):
+                """Offense/defense stylistic identity for a comp's team, from KenPom
+                AdjO/AdjD national percentiles — None when a team isn't a clear outlier
+                either way (most teams), so the badge only shows up when it's meaningful."""
+                o_pct = national_pct("TEAM_ADJ_O", row.get("TEAM_ADJ_O"), card_benchmarks)
+                d_pct = national_pct("TEAM_ADJ_D", row.get("TEAM_ADJ_D"), card_benchmarks)
+                if o_pct is None or d_pct is None:
+                    return None
+                if o_pct >= 75 and d_pct >= 75:
+                    return ("Complete Team", "#6d28d9")
+                if o_pct >= 75 and o_pct - d_pct >= 15:
+                    return ("High-Octane Offense", "#c2410c")
+                if d_pct >= 75 and d_pct - o_pct >= 15:
+                    return ("Elite Defense", "#1d4ed8")
+                return None
+
             if not top_matches:
                 st.info("No close height/stat matches found in the current season database.")
             else:
@@ -2910,6 +3004,7 @@ with tab_card:
                     c_conf = str(match_data.get("CONF", ""))
                     c_ht   = str(match_data.get("HEIGHT", ""))
                     c_class = str(match_data.get("CLASS", "") or "")
+                    c_identity = _team_identity_tag(match_data)
 
                     # Basic box score — plain, no percentile, easy to scan at a glance.
                     basic_row_html = (
@@ -2921,12 +3016,14 @@ with tab_card:
                     )
 
                     # Advanced stats — percentile-colored, same visual language as the Player Card.
-                    adv_stats = [("TS", "TS%"), ("USG", "USG%"), ("EFG", "eFG%"), ("BPM", "BPM"), ("AST", "AST%")]
+                    adv_stats = [("TS", "TS%"), ("USG", "USG%"), ("EFG", "eFG%"), ("BPM", "BPM"),
+                                 ("AST", "AST%"), ("TEAM_ADJ_EM", "Team AdjEM")]
                     adv_html = ""
                     for i, (stat, label) in enumerate(adv_stats):
                         v = _stat_val(match_data, stat)
                         p = national_pct(stat, v, card_benchmarks)
-                        tile = _pct_tile(label, v, p)
+                        suffix = "" if stat in ("BPM", "TEAM_ADJ_EM") else "%"
+                        tile = _pct_tile(label, v, p, suffix=suffix)
                         if i == len(adv_stats) - 1:
                             tile = tile.replace("border-right:1px solid #e5e7eb;", "")
                         adv_html += tile
@@ -2973,6 +3070,15 @@ with tab_card:
                         zone_row_html = ("<div style=\"display:flex;border:1px solid #e5e7eb;border-radius:5px;"
                                           "overflow:hidden;margin-bottom:6px;\">" + zone_html + "</div>")
 
+                    identity_badge_html = ""
+                    if c_identity:
+                        _id_label, _id_color = c_identity
+                        identity_badge_html = (
+                            "<span style=\"display:inline-block;margin-top:4px;font-size:8px;font-weight:600;"
+                            "padding:2px 7px;border-radius:3px;background:" + _id_color + "1A;color:" + _id_color +
+                            ";border:1px solid " + _id_color + "55;\">" + _id_label + "</span>"
+                        )
+
                     html = (
                         "<div style=\"background:#ffffff;border:1px solid #dde2ee;border-left:4px solid #2774AE;border-radius:8px;padding:12px 14px;margin-bottom:8px;\">"
                         "<div style=\"display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\">"
@@ -2980,6 +3086,7 @@ with tab_card:
                         "<div style=\"font-size:14px;font-weight:700;color:#111827;\">" + c_name + "</div>"
                         "<div style=\"font-size:9px;color:#6b7280;margin-top:2px;\">" + c_ht
                         + (" &middot; " + c_class if c_class else "") + " &middot; " + c_team + " (" + c_conf + ")</div>"
+                        + identity_badge_html +
                         "</div>"
                         "<span style=\"font-size:8px;font-weight:600;padding:4px 8px;border-radius:3px;background:#e8f1f9;color:#2774AE;border:1px solid #b8d3ec;\">" + str(pct) + "% match</span>"
                         "</div>"
@@ -3075,6 +3182,7 @@ with tab_onepager:
     op_player = st.session_state.active_player
     op_match = df_all[df_all["PLAYER"] == op_player]
     op_stats = op_match.iloc[0] if not op_match.empty else None
+    gl_op_player = resolve_game_log_name(op_player)
 
     conn = sqlite3.connect('scouting_hub.db')
     cursor = conn.cursor()
@@ -3094,33 +3202,56 @@ with tab_onepager:
         or (op_stats["TEAM"] if op_stats is not None else None)
         or "—"
     )
-    op_pos = (
-        (op_roster_row[0] if op_roster_row and op_roster_row[0] else None)
-        or (op_note_row[1] if op_note_row and op_note_row[1] else None)
-        or "—"
-    )
     op_height = (
         (op_roster_row[1] if op_roster_row and op_roster_row[1] else None)
         or (op_stats["HEIGHT"] if op_stats is not None else None)
         or "—"
     )
-    op_class = (
+    # Advance class year, same convention as the Player Card: data is 2025-26, we're building for 2026-27
+    _op_class_advance = {"Fr": "So", "So": "Jr", "Jr": "Sr", "Sr": "Graduate",
+                          "Rs-Fr": "Fr", "Rs-So": "So", "Rs-Jr": "Jr", "Rs-Sr": "Sr"}
+    _op_raw_class = (
         (op_roster_row[2] if op_roster_row and op_roster_row[2] else None)
         or (op_stats["CLASS"] if op_stats is not None else None)
-        or "—"
     )
-    op_agent = (op_note_row[2] if op_note_row and op_note_row[2] else None) or "—"
+    op_class = _op_class_advance.get(str(_op_raw_class).strip(), str(_op_raw_class).strip()) if _op_raw_class else "—"
+
     op_scout = (op_note_row[5] if op_note_row and op_note_row[5] else "")
     op_notes_raw = (op_note_row[4] if op_note_row and op_note_row[4] else "").strip()
     op_photo = op_note_row[3] if op_note_row and op_note_row[3] else ""
-    if not op_photo:
-        _op_tid = ""
+
+    _op_tid = ""
+    try:
+        _op_row = df_all[df_all["PLAYER"] == op_player]
+        if not _op_row.empty and "team_espn_id" in _op_row.columns:
+            _tid_val = _op_row.iloc[0]["team_espn_id"]
+            if pd.notna(_tid_val):
+                _op_tid = str(_tid_val)
+    except Exception:
+        pass
+    if not _op_tid:
         try:
-            _op_row = df_all[df_all["PLAYER"] == op_player]
-            if not _op_row.empty and "team_espn_id" in _op_row.columns:
-                _op_tid = str(_op_row.iloc[0]["team_espn_id"])
+            _op_gl_conn = sqlite3.connect("scouting_hub.db")
+            _op_tid_row = _op_gl_conn.execute(
+                "SELECT team_espn_id FROM player_game_logs WHERE player_name = ? AND team_espn_id IS NOT NULL LIMIT 1",
+                (gl_op_player,)
+            ).fetchone()
+            _op_gl_conn.close()
+            if _op_tid_row:
+                _op_tid = str(_op_tid_row[0])
         except Exception:
             pass
+
+    # Position: roster/scouting-report entry first, then fall back to the ESPN bio scrape
+    # (same source the Player Card uses), since most portal players have no roster row.
+    op_pos = (
+        (op_roster_row[0] if op_roster_row and op_roster_row[0] else None)
+        or (op_note_row[1] if op_note_row and op_note_row[1] else None)
+        or fetch_espn_bio(op_player, _op_tid).get("position", "")
+        or "—"
+    )
+
+    if not op_photo:
         op_photo = fetch_espn_headshot(op_player, _op_tid)
 
     banner_lines = [ln.strip() for ln in op_notes_raw.split("\n") if ln.strip()][:3]
@@ -3143,7 +3274,7 @@ with tab_onepager:
     # Same box-score source and Season/Conference/Non-Conf split logic as the Player Card,
     # so the two views always show matching numbers.
     _op_hdr_box = load_consistent_boxscore_stats()
-    _op_hdr_row = _op_hdr_box[_op_hdr_box["PLAYER"] == op_player]
+    _op_hdr_row = _op_hdr_box[_op_hdr_box["PLAYER"] == gl_op_player]
     if len(_op_hdr_row) > 1:
         _op_team_match = _op_hdr_row[_op_hdr_row["TEAM"].str.contains(str(op_team), case=False, na=False)]
         if not _op_team_match.empty:
@@ -3157,11 +3288,11 @@ with tab_onepager:
         _op_in_conf_ids = tuple(sorted(eid for eid, c in _op_conf_map.items() if c == _op_own_conf))
         if _op_in_conf_ids:
             _op_conf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids)
-            _ocr = _op_conf_box[_op_conf_box["PLAYER"] == op_player]
+            _ocr = _op_conf_box[_op_conf_box["PLAYER"] == gl_op_player]
             op_conf_row = _ocr.iloc[0] if not _ocr.empty else None
 
             _op_nonconf_box = load_consistent_boxscore_stats(conf_ids=_op_in_conf_ids, exclude_conf_ids=True)
-            _oncr = _op_nonconf_box[_op_nonconf_box["PLAYER"] == op_player]
+            _oncr = _op_nonconf_box[_op_nonconf_box["PLAYER"] == gl_op_player]
             op_nonconf_row = _oncr.iloc[0] if not _oncr.empty else None
 
     def _op_stats_row(label, r):
@@ -3291,8 +3422,7 @@ with tab_onepager:
       <div class="facts">
         <span class="lbl">Current Team:</span> {op_team}<br>
         <span class="lbl">Height:</span> {op_height}<br>
-        <span class="lbl">Class:</span> {op_class} &nbsp;&bull;&nbsp; <span class="lbl">Pos:</span> {op_pos}<br>
-        <span class="lbl">Agent:</span> {op_agent}
+        <span class="lbl">Class:</span> {op_class} &nbsp;&bull;&nbsp; <span class="lbl">Pos:</span> {op_pos}
       </div>
       <ul class="banner-notes">{banner_bullets_html}</ul>
     </div>
@@ -3470,7 +3600,7 @@ with tab2:
     # column_config instead of mutating the underlying data used for filtering/sorting above.
     _pct_cols = {"USG", "EFG", "TS", "AST", "OR", "DR", "BLK", "STL", "FTR", "FT_PCT",
                  "TWO_P", "THREE_P", "THREE_P_100", "MIN_PCT"}
-    _decimal_cols = {"PPG", "PRPG", "BPM", "OBPM", "DBPM", "SOS", "RPG", "APG", "TO"}
+    _decimal_cols = {"PPG", "PRPG", "BPM", "OBPM", "DBPM", "SOS", "RPG", "APG", "TO", "MPG"}
     _discovery_col_config = {
         "PLAYER": st.column_config.TextColumn("Player", pinned=True),
         "TEAM": st.column_config.TextColumn("Team"),
