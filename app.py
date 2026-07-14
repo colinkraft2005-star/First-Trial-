@@ -1699,7 +1699,7 @@ _gl_ready = game_log_db_ready()
 all_player_names = sorted(list(df_all["PLAYER"].unique()))
 
 if "active_player" not in st.session_state:
-    st.session_state.active_player = all_player_names[0]
+    st.session_state.active_player = None
 if "go_to_profile" not in st.session_state:
     st.session_state.go_to_profile = False
 
@@ -1713,7 +1713,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab_synergy = st.tabs([
+tab_home, tab_card, tab_depth, tab_onepager, tab2, tab3, tab4, tab_synergy = st.tabs([
+    "Home",
     "Player Card",
     "Depth Chart",
     "One Pager",
@@ -1732,7 +1733,12 @@ components.html(f"""
 <script>
 (function() {{
     var goToProfile = {'true' if _go_to_profile else 'false'};
-    var savedTab = goToProfile ? 0 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
+    // v2: Home tab added at index 0 — wipe any stale saved index so we default to Home
+    if (localStorage.getItem('uclaTabVersion') !== '2') {{
+        localStorage.removeItem('uclaActiveTab');
+        localStorage.setItem('uclaTabVersion', '2');
+    }}
+    var savedTab = goToProfile ? 1 : parseInt(localStorage.getItem('uclaActiveTab') || '0');
 
     function attachListeners(tabs) {{
         tabs.forEach(function(tab, i) {{
@@ -1744,11 +1750,11 @@ components.html(f"""
 
     function tryRestore() {{
         var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-        if (tabs.length >= 6) {{
+        if (tabs.length >= 8) {{
             attachListeners(tabs);
             if (goToProfile || savedTab > 0) {{
                 tabs[savedTab].click();
-                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '0'); }}
+                if (goToProfile) {{ localStorage.setItem('uclaActiveTab', '1'); }}
             }}
         }} else {{
             setTimeout(tryRestore, 100);
@@ -2398,6 +2404,169 @@ div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-
 
 
 # ==========================================
+# TAB: HOME
+# ==========================================
+
+# Tab index map — must match the st.tabs order (0=Home, so cards start at 1)
+_TAB_INDEX = {
+    "Player Card": 1,
+    "Depth Chart": 2,
+    "One Pager": 3,
+    "Portal Discovery Engine": 4,
+    "Front Office Target Board": 5,
+    "Big Board Print View": 6,
+    "Synergy Play Types": 7,
+}
+
+_HOME_CARDS = [
+    {
+        "title": "Player Card",
+        "desc": "Full individual profile — advanced stats, shot chart, percentile bars, and comp finder.",
+        "img": "static/card_player.jpg",
+    },
+    {
+        "title": "Depth Chart",
+        "desc": "Team depth by position with BartTorvik advanced metrics and eligibility status.",
+        "img": "static/card_depth.jpg",
+    },
+    {
+        "title": "One Pager",
+        "desc": "Printable one-page player summary for coaching staff and recruiting meetings.",
+        "img": "static/card_onepager.jpg",
+    },
+    {
+        "title": "Portal Discovery Engine",
+        "desc": "Search and filter transfer portal targets by position, metrics, and fit.",
+        "img": "static/card_portal.jpg",
+    },
+    {
+        "title": "Front Office Target Board",
+        "desc": "Priority-tiered recruiting board with NIL valuations, roles, and scouting notes.",
+        "img": "static/card_targetboard.jpg",
+    },
+    {
+        "title": "Synergy Play Types",
+        "desc": "PnR, isolation, spot-up, and 6 more play type breakdowns with position-group percentiles.",
+        "img": "static/card_synergy.jpg",
+    },
+]
+
+# If a card was clicked last run, inject JS to switch to that tab index
+_nav_to = st.query_params.get("nav")
+if _nav_to is not None:
+    try:
+        _nav_idx = int(_nav_to)
+        st.components.v1.html(f"""
+<script>
+(function() {{
+    function clickTab() {{
+        var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+        if (tabs.length > {_nav_idx}) {{
+            tabs[{_nav_idx}].click();
+            var url = new URL(window.parent.location.href);
+            url.searchParams.delete('nav');
+            window.parent.history.replaceState(null, '', url.toString());
+        }} else {{
+            setTimeout(clickTab, 100);
+        }}
+    }}
+    setTimeout(clickTab, 200);
+}})();
+</script>
+""", height=0)
+    except (ValueError, TypeError):
+        pass
+
+with tab_home:
+    import os, base64
+
+    def _b64_img(path):
+        if not os.path.exists(path):
+            return None
+        ext = path.rsplit(".", 1)[-1].lower()
+        mime = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
+        b64 = base64.b64encode(open(path,"rb").read()).decode()
+        return f"data:{mime};base64,{b64}"
+
+    st.markdown(
+        "<div style='text-align:center;padding:18px 0 28px'>"
+        "<div style='font-size:2.2rem;font-weight:900;color:#2774AE;letter-spacing:-0.01em'>"
+        "UCLA Basketball Analytics</div>"
+        "<div style='font-size:1.0rem;color:#64748b;margin-top:6px'>"
+        "Recruiting · Scouting · Player Development · Play Types</div>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    # Build card data with base64 images so the iframe can render them
+    _card_data = []
+    for card in _HOME_CARDS:
+        _card_data.append({
+            "title": card["title"],
+            "desc":  card["desc"],
+            "img":   _b64_img(card["img"]),
+            "tab":   _TAB_INDEX[card["title"]],
+        })
+
+    # Hidden Streamlit buttons — one per card, triggered by JS card clicks
+    # CSS injected into parent to hide them
+
+    # Build the full card grid as a single HTML component
+    import json as _json
+    _cards_json = _json.dumps(_card_data)
+    components.html(f"""
+<style>
+  body {{ margin:0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:transparent; }}
+  .grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:20px; padding:4px 2px 16px; }}
+  .card {{
+    border-radius:12px; overflow:hidden; border:1.5px solid #e2e8f0;
+    background:#fff; cursor:pointer;
+    transition: box-shadow 0.18s, transform 0.18s, border-color 0.18s;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }}
+  .card:hover {{
+    box-shadow: 0 8px 28px rgba(39,116,174,0.22);
+    transform: translateY(-3px);
+    border-color: #2774AE;
+  }}
+  .card img {{ width:100%; height:175px; object-fit:cover; display:block; }}
+  .placeholder {{
+    width:100%; height:175px;
+    background: linear-gradient(135deg,#2774AE 0%,#1a5c8a 100%);
+    display:flex; align-items:center; justify-content:center;
+    color:rgba(255,255,255,0.18); font-size:1.8rem; font-weight:900;
+  }}
+  .body {{ padding:13px 15px 15px; }}
+  .title {{ font-size:1.05rem; font-weight:800; color:#2774AE; margin-bottom:4px; }}
+  .desc  {{ font-size:0.80rem; color:#475569; line-height:1.4; }}
+</style>
+<div class="grid" id="grid"></div>
+<script>
+var cards = {_cards_json};
+var grid  = document.getElementById('grid');
+cards.forEach(function(c, i) {{
+  var el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML =
+    (c.img
+      ? "<img src='" + c.img + "'>"
+      : "<div class='placeholder'>UCLA</div>") +
+    "<div class='body'>" +
+      "<div class='title'>" + c.title + "</div>" +
+      "<div class='desc'>"  + c.desc  + "</div>" +
+    "</div>";
+  el.addEventListener('click', function() {{
+    var url = new URL(window.parent.location.href);
+    url.searchParams.set('nav', c.tab);
+    window.parent.location.href = url.toString();
+  }});
+  grid.appendChild(el);
+}});
+</script>
+""", height=520, scrolling=False)
+
+
+# ==========================================
 # TAB: PLAYER CARD (Individual Profile + Advanced Card + Target Board link-up)
 # ==========================================
 with tab_card:
@@ -2411,8 +2580,13 @@ with tab_card:
     if st.session_state.active_player != st.session_state.get("_last_synced_active_player"):
         st.session_state["card_player_select"] = st.session_state.active_player
 
-    selected_dropdown = st.selectbox("Search or select any player:", all_player_names,
-                                     key="card_player_select")
+    _player_options = [None] + all_player_names
+    selected_dropdown = st.selectbox(
+        "Search or select a player:",
+        _player_options,
+        format_func=lambda x: "— Select a player —" if x is None else x,
+        key="card_player_select"
+    )
 
     if selected_dropdown != st.session_state.active_player:
         st.session_state.active_player = selected_dropdown
@@ -2420,6 +2594,16 @@ with tab_card:
     st.session_state["_last_synced_active_player"] = st.session_state.active_player
 
     current_player = st.session_state.active_player
+
+    if current_player is None:
+        st.markdown(
+            "<div style='text-align:center;padding:80px 0;color:#94a3b8;font-size:1.1rem'>"
+            "Search for a player above to view their card."
+            "</div>",
+            unsafe_allow_html=True
+        )
+        st.stop()
+
     p_data = df_all[df_all["PLAYER"] == current_player].iloc[0]
 
     conn = sqlite3.connect('scouting_hub.db')
