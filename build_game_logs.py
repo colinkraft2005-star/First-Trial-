@@ -343,6 +343,14 @@ def fetch_all_positions(conn, espn_teams):
                     name = athlete.get("displayName", "")
                     abbr = athlete.get("position", {}).get("abbreviation", "F")
                     group = pos_map.get(abbr, "Wing")
+                    # Forwards 6'9"+ play as bigs regardless of ESPN label
+                    if group == "Wing":
+                        ht = athlete.get("height")
+                        try:
+                            if ht and int(ht) >= 81:  # 81 inches = 6'9"
+                                group = "Big"
+                        except (TypeError, ValueError):
+                            pass
                     if name:
                         rows.append((name, group))
         except Exception:

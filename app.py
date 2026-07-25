@@ -697,6 +697,61 @@ def load_quality_game_stats(max_opp_rank: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=3600)
+def load_cbb_player_agg() -> pd.DataFrame:
+    """Load cbb_player_agg for season=2026 from scouting_hub.db."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query(
+            "SELECT * FROM cbb_player_agg WHERE season = 2026",
+            conn,
+        )
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def load_cbb_pbp_zones() -> pd.DataFrame:
+    """Load cbb_player_agg_pbp for season=2026 from scouting_hub.db."""
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query(
+            "SELECT * FROM cbb_player_agg_pbp WHERE season = 2026",
+            conn,
+        )
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def build_pbp_benchmarks() -> dict:
+    """
+    Build sorted value lists for shot-zone stats from all season-scope PBP rows
+    with meaningful shot volume. Used for percentile coloring on the player card.
+    """
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        df = pd.read_sql_query(
+            "SELECT * FROM cbb_player_agg_pbp WHERE scope='season' AND fga > 20",
+            conn,
+        )
+        conn.close()
+    except Exception:
+        return {}
+
+    out = {}
+    for col in ["atr2_fg_pct", "atr2_fga_freq", "mid2_fg_pct", "mid2_fga_freq",
+                "fg3_pct", "fga3_rate", "ft_pct"]:
+        vals = df[col].dropna().astype(float).tolist()
+        if vals:
+            out[col] = sorted(vals)
+    return out
+
+
 def game_log_db_ready() -> bool:
     """True only after build_game_logs.py has populated both core tables."""
     try:
@@ -2099,6 +2154,46 @@ if df_all is None:
 
 _gl_ready = game_log_db_ready()
 
+# Reclassify forwards by height: Wing >= 6'9" (81 in) → Big, Big < 81 in → Wing.
+# Runs once at startup; idempotent.
+def _reclassify_positions_by_height(df):
+    try:
+        conn = sqlite3.connect("scouting_hub.db")
+        cur = conn.cursor()
+        cur.execute("SELECT player_name, position_group FROM player_positions")
+        rows = cur.fetchall()
+        name_to_pos = {r[0]: r[1] for r in rows}
+
+        # Build a lookup: PLAYER → HEIGHT from BartTorvik
+        ht_lookup = {}
+        for _, row in df.iterrows():
+            pname = row.get("PLAYER", "")
+            ht = row.get("HEIGHT", "")
+            if pname and ht:
+                ht_lookup[pname] = ht
+
+        updates = []
+        for pname, cur_pos in name_to_pos.items():
+            ht_str = ht_lookup.get(pname)
+            if not ht_str:
+                continue
+            ht_in = parse_height_inches(ht_str)
+            if cur_pos == "Wing" and ht_in >= 81:
+                updates.append(("Big", pname))
+            elif cur_pos == "Big" and ht_in < 81:
+                updates.append(("Wing", pname))
+
+        if updates:
+            cur.executemany(
+                "UPDATE player_positions SET position_group = ? WHERE player_name = ?",
+                updates,
+            )
+            conn.commit()
+    except Exception:
+        pass  # Non-fatal; percentiles still work with old classifications
+
+_reclassify_positions_by_height(df_all)
+
 all_player_names = sorted(list(df_all["PLAYER"].unique()))
 
 if "active_player" not in st.session_state:
@@ -2717,7 +2812,7 @@ div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-
             _styled_top_lu,
             hide_index=True,
             use_container_width=True,
-            height=430,
+            height=460,
             column_config={
                 "Lineup":    st.column_config.TextColumn("Lineup"),
                 "Min":       st.column_config.NumberColumn("Min", format="%.0f"),
@@ -2738,82 +2833,163 @@ div.element-container:has(#dc-hide-{card_key}) + div.element-container div[data-
     # ==========================================
     # LINEUP ANALYZER
     # ==========================================
-    st.markdown("#### Lineup Combination Analyzer")
-    st.caption(
-        "Select any 2–5 players to see the team's offensive and defensive performance while on the court together."
-    )
+    st.markdown("#### Player On/Off Impact")
+    st.caption("2025-26 season · team efficiency with each player on vs. off the court")
 
-    _segs = load_lineup_segments()
-    _seg_players = []
-    if not _segs.empty:
-        all_mentioned = pd.concat([
-            _segs["p1"], _segs["p2"], _segs["p3"], _segs["p4"], _segs["p5"]
-        ]).dropna().unique().tolist()
-        _seg_players = sorted(all_mentioned)
+    @st.cache_data(ttl=3600)
+    def load_on_off_segments():
+        try:
+            conn = sqlite3.connect("scouting_hub.db")
+            df = pd.read_sql_query(
+                "SELECT p1,p2,p3,p4,p5,seconds,"
+                "team_pts,opp_pts,team_fga,team_fgm,team_fg3a,team_fg3m,"
+                "team_fta,team_ftm,team_tov,team_orb,team_drb,"
+                "opp_fga,opp_fgm,opp_fg3a,opp_fg3m,opp_fta,opp_tov,opp_orb,opp_drb "
+                "FROM lineup_segments",
+                conn,
+            )
+            conn.close()
+            return df.dropna(subset=["p1","p2","p3","p4","p5"])
+        except Exception:
+            return pd.DataFrame()
 
-    if not _seg_players:
-        st.info("No lineup segment data found. Run `python3 build_lineup_segments.py` first.")
+    def _seg_stats(segs):
+        if segs.empty:
+            return None
+        t_fga  = segs["team_fga"].sum()
+        t_fg3a = segs["team_fg3a"].sum()
+        t_fg3m = segs["team_fg3m"].sum()
+        t_fta  = segs["team_fta"].sum()
+        t_pts  = segs["team_pts"].sum()
+        t_tov  = segs["team_tov"].sum()
+        t_orb  = segs["team_orb"].sum()
+        t_drb  = segs["team_drb"].sum()
+        o_fga  = segs["opp_fga"].sum()
+        o_fta  = segs["opp_fta"].sum()
+        o_pts  = segs["opp_pts"].sum()
+        o_tov  = segs["opp_tov"].sum()
+        o_orb  = segs["opp_orb"].sum()
+        mins   = segs["seconds"].sum() / 60
+        t_poss = t_fga + 0.44*t_fta + t_tov - t_orb
+        o_poss = o_fga + 0.44*o_fta + o_tov - o_orb
+        poss   = (t_poss + o_poss) / 2 if (t_poss + o_poss) > 0 else 1
+        ortg   = round(t_pts / poss * 100, 1)
+        drtg   = round(o_pts / poss * 100, 1)
+        ts_d   = 2 * (t_fga + 0.44 * t_fta)
+        ts     = round(t_pts / ts_d * 100, 1) if ts_d > 0 else 0.0
+        tov_r  = round(t_tov / t_poss * 100, 1) if t_poss > 0 else 0.0
+        fg3_pct = round(t_fg3m / t_fg3a * 100, 1) if t_fg3a > 0 else 0.0
+        fg3_r  = round(t_fg3a / t_fga * 100, 1)   if t_fga  > 0 else 0.0
+        drb_pct = round(t_drb / (t_drb + o_orb) * 100, 1) if (t_drb + o_orb) > 0 else 0.0
+        orb_pct = round(t_orb / (t_orb + (segs["opp_drb"].sum())) * 100, 1) if (t_orb + segs["opp_drb"].sum()) > 0 else 0.0
+        return dict(mins=round(mins,1), ortg=ortg, drtg=drtg, net=round(ortg-drtg,1),
+                    ts=ts, tov_r=tov_r, fg3_pct=fg3_pct, fg3_r=fg3_r,
+                    drb_pct=drb_pct, orb_pct=orb_pct)
+
+    _oo_segs = load_on_off_segments()
+
+    if _oo_segs.empty:
+        st.info("No lineup segment data found.")
     else:
-        selected_lineup = st.multiselect(
+        _all_players = sorted(pd.concat([
+            _oo_segs["p1"],_oo_segs["p2"],_oo_segs["p3"],_oo_segs["p4"],_oo_segs["p5"]
+        ]).dropna().unique().tolist())
+
+        _selected_oo = st.multiselect(
             "Select players:",
-            options=_seg_players,
+            options=_all_players,
             default=[],
             placeholder="Search players...",
             label_visibility="collapsed",
         )
 
-        if len(selected_lineup) >= 2:
-            stats = compute_lineup_stats_from_segments(selected_lineup, _segs)
+        if _selected_oo:
+            # (label, key, higher_is_better, fmt, diff_range)
+            # diff_range = (bad_end, good_end) → maps to blue→gold
+            # Inverted range for lower-is-better stats
+            STATS = [
+                ("ORtg",  "ortg",    True,  ".1f",  (-15, +15)),
+                ("DRtg",  "drtg",    False, ".1f",  (+15, -15)),
+                ("Net",   "net",     True,  "+.1f", (-20, +20)),
+                ("TS%",   "ts",      True,  ".1f",  (-8,  +8)),
+                ("TOV%",  "tov_r",   False, ".1f",  (+5,  -5)),
+                ("3P%",   "fg3_pct", True,  ".1f",  (-8,  +8)),
+                ("3PR",   "fg3_r",   True,  ".1f",  (-8,  +8)),
+                ("DReb%", "drb_pct", True,  ".1f",  (-10, +10)),
+                ("OReb%", "orb_pct", True,  ".1f",  (-10, +10)),
+            ]
 
-            if stats is None:
-                st.warning("No lineup segments found with all selected players on the floor.")
-            else:
-                mins = stats["minutes"]
-                segs = stats["segments"]
-                games = stats["games"]
-                net = stats["net_rtg"]
-                # Same blue-grey-gold language as everywhere else, instead of a plain
-                # green/red split that was the only place on the site still using it.
-                net_bg, net_color = pct_color(lineup_pct("net_rtg", net))
-                net_sign = "+" if net >= 0 else ""
+            def _diff_pct_abs(diff, bad_end, good_end):
+                span = good_end - bad_end
+                if span == 0:
+                    return 50.0
+                return max(0.0, min(100.0, (diff - bad_end) / span * 100))
 
-                st.markdown(
-                    f"<div style='font-size:13px;color:#64748B;margin-bottom:14px;'>"
-                    f"<b>{mins:.0f} minutes</b> together across {segs} stints / {games} game{'s' if games!=1 else ''} · "
-                    f"<span style='background:{net_bg};color:{net_color};font-weight:700;padding:2px 8px;"
-                    f"border-radius:4px;'>Net {net_sign}{net:.1f}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
+            def _player_display(name):
+                parts = name.split()
+                suffixes = {"jr.", "sr.", "ii", "iii", "iv"}
+                last_norm = parts[-1].lower().rstrip(".")
+                if len(parts) >= 3 and (last_norm + "." in suffixes or last_norm in suffixes):
+                    return " ".join(parts[1:])
+                return parts[-1]
+
+            def _build_card(s_on, s_off, title):
+                header_cells = "<td style='width:56px;'></td>"
+                for label, key, hib, fmt, drange in STATS:
+                    header_cells += f"<th style='font-family:\"DM Mono\",monospace;font-size:9px;font-weight:700;letter-spacing:0.1em;color:#64748B;text-align:center;padding:0 4px 6px;white-space:nowrap;'>{label}</th>"
+
+                on_cells = "<td style='font-family:\"DM Mono\",monospace;font-size:9px;font-weight:700;letter-spacing:0.08em;color:#2D68C4;padding:6px 8px 6px 0;'>ON</td>"
+                for label, key, hib, fmt, drange in STATS:
+                    fmt_str = f"{{:{fmt}}}"
+                    on_cells += f"<td style='font-family:\"DM Mono\",monospace;font-size:13px;font-weight:700;color:#0F172A;text-align:center;padding:4px;'>{fmt_str.format(s_on[key])}</td>"
+
+                off_cells = "<td style='font-family:\"DM Mono\",monospace;font-size:9px;font-weight:700;letter-spacing:0.08em;color:#64748B;padding:6px 8px 6px 0;'>OFF</td>"
+                for label, key, hib, fmt, drange in STATS:
+                    fmt_str = f"{{:{fmt}}}"
+                    off_cells += f"<td style='font-family:\"DM Mono\",monospace;font-size:13px;font-weight:700;color:#64748B;text-align:center;padding:4px;'>{fmt_str.format(s_off[key])}</td>"
+
+                diff_cells = "<td style='font-family:\"DM Mono\",monospace;font-size:9px;font-weight:700;letter-spacing:0.08em;color:#94A3B8;padding:6px 8px 6px 0;'>+/−</td>"
+                for label, key, hib, fmt, drange in STATS:
+                    diff = s_on[key] - s_off[key]
+                    bg, fg = pct_color(_diff_pct_abs(diff, drange[0], drange[1]))
+                    sign = "+" if diff >= 0 else ""
+                    diff_cells += f"<td style='text-align:center;padding:4px;'><span style='background:{bg};color:{fg};font-family:\"DM Mono\",monospace;font-size:11px;font-weight:700;border-radius:4px;padding:2px 5px;display:inline-block;'>{sign}{diff:.1f}</span></td>"
+
+                return f"""
+                <div style="font-family:system-ui,sans-serif;background:#fff;border:1px solid #dde2ee;
+                            border-radius:10px;padding:14px 16px 12px;margin-bottom:2px;">
+                  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">
+                    <div style="font-size:15px;font-weight:700;color:#0F172A;">{title}</div>
+                    <div style="font-family:'DM Mono',monospace;font-size:10px;color:#64748B;letter-spacing:0.04em;">
+                      {s_on['mins']:.0f} MIN ON &nbsp;·&nbsp; {s_off['mins']:.0f} MIN OFF
+                    </div>
+                  </div>
+                  <table style="width:100%;border-collapse:collapse;">
+                    <thead><tr>{header_cells}</tr></thead>
+                    <tbody>
+                      <tr style="border-top:1px solid #f1f5f9;">{on_cells}</tr>
+                      <tr style="border-top:1px solid #f1f5f9;">{off_cells}</tr>
+                      <tr style="border-top:1px solid #e2e8f0;">{diff_cells}</tr>
+                    </tbody>
+                  </table>
+                </div>"""
+
+            # Combination card: all selected players on the floor together
+            def _combo_mask(segs, players):
+                return segs.apply(
+                    lambda r: all(p in (r.p1, r.p2, r.p3, r.p4, r.p5) for p in players),
+                    axis=1,
                 )
 
-                def lu_card(col_obj, key, display_val, label):
-                    pct = lineup_pct(key, stats[key])
-                    bg, fg = pct_color(pct)
-                    col_obj.markdown(
-                        f"<div style='background:{bg};border-radius:8px;padding:12px 6px;text-align:center;'>"
-                        f"<div style='font-size:20px;font-weight:700;color:{fg};line-height:1;'>{display_val}</div>"
-                        f"<div style='font-size:9px;color:{fg};opacity:0.8;margin-top:4px;letter-spacing:0.3px;'>{label}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+            combo_mask = _combo_mask(_oo_segs, _selected_oo)
+            s_on  = _seg_stats(_oo_segs[combo_mask])
+            s_off = _seg_stats(_oo_segs[~combo_mask])
 
-                st.markdown("<div style='font-size:10px;font-weight:700;color:#2D68C4;letter-spacing:0.8px;margin-bottom:6px;'>OFFENSE</div>", unsafe_allow_html=True)
-                c1, c2, c3, c4, c5 = st.columns(5)
-                lu_card(c1, "ortg",       f"{stats['ortg']:.1f}",       "Off Rtg")
-                lu_card(c2, "ts",         f"{stats['ts']:.1f}%",        "TS%")
-                lu_card(c3, "three_pct",  f"{stats['three_pct']:.1f}%", "3P%")
-                lu_card(c4, "three_rate", f"{stats['three_rate']:.1f}%","3P Rate")
-                lu_card(c5, "tov_rate",   f"{stats['tov_rate']:.1f}%",  "TOV%")
-
-                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-                st.markdown("<div style='font-size:10px;font-weight:700;color:#64748B;letter-spacing:0.8px;margin-bottom:6px;'>DEFENSE & REBOUNDING</div>", unsafe_allow_html=True)
-                d1, d2, d3, d4, d5 = st.columns(5)
-                lu_card(d1, "drtg",         f"{stats['drtg']:.1f}",         "Def Rtg")
-                lu_card(d2, "opp_ts",       f"{stats['opp_ts']:.1f}%",      "Opp TS%")
-                lu_card(d3, "opp_tov_rate", f"{stats['opp_tov_rate']:.1f}%","Opp TOV%")
-                lu_card(d4, "drb_pct",      f"{stats['drb_pct']:.1f}%",     "DReb%")
-                lu_card(d5, "orb_pct",      f"{stats['orb_pct']:.1f}%",     "OReb%")
+            if not s_on or not s_off:
+                st.info("Not enough data for that combination.")
+            else:
+                names = " + ".join(_player_display(p) for p in _selected_oo)
+                components.html(_build_card(s_on, s_off, names), height=148, scrolling=False)
 
     st.divider()
 
@@ -3280,6 +3456,50 @@ with tab_card:
                 f"</div>"
             )
 
+        def _divider_row():
+            return "<div style='height:1px;background:#e8eaed;margin:7px 0'></div>"
+
+        def _shot_group(group_label, rows):
+            """
+            rows: list of (stat_label, val, pct, suffix)
+            Group label is vertically centered spanning all rows, bars align with _stat_row_colored.
+            Total left column = 36px label + 6px gap + 30px stat label = 72px, matching _stat_row_colored.
+            """
+            def _bar_row(stat_label, val, pct, suffix=""):
+                bg, bubble_fg = pct_color(pct)
+                disp    = _fmt(val)
+                val_str = f"{disp}{suffix}" if disp != "-" else "-"
+                if pct is not None:
+                    fill_w  = f"{pct:.1f}%"
+                    pct_num = f"{pct:.0f}"
+                    bubble = (
+                        f"<div style='position:absolute;top:50%;left:{fill_w};transform:translate(-50%,-50%);background:{bg};"
+                        f"color:{bubble_fg};font-size:0.62rem;font-weight:900;border-radius:50%;width:20px;height:20px;"
+                        f"display:flex;align-items:center;justify-content:center;z-index:2;border:1.5px solid rgba(0,0,0,0.25)'>{pct_num}</div>"
+                    )
+                    fill = f"<div style='position:absolute;top:0;left:0;height:100%;width:{fill_w};background:{bg};border-radius:4px'></div>"
+                else:
+                    fill = bubble = ""
+                return (
+                    f"<div style='display:flex;align-items:center;margin-bottom:6px;gap:10px'>"
+                    f"<span style='font-size:0.82rem;font-weight:800;color:#111;min-width:30px;text-align:right;flex-shrink:0'>{stat_label}</span>"
+                    f"<div style='flex:1;position:relative;height:20px;border-radius:4px;overflow:visible;background:#e0e0e0'>"
+                    f"{fill}{bubble}"
+                    f"</div>"
+                    f"<span style='font-size:0.95rem;font-weight:900;color:#111;min-width:42px;text-align:right;flex-shrink:0'>{val_str}</span>"
+                    f"</div>"
+                )
+            bars = "".join(_bar_row(*r) for r in rows)
+            return (
+                f"<div style='display:flex;align-items:center;gap:4px;margin-bottom:2px'>"
+                f"<div style='min-width:52px;flex-shrink:0;display:flex;align-items:center;justify-content:flex-start;margin-left:-5px'>"
+                f"<span style='font-size:0.95rem;font-weight:900;letter-spacing:0.04em;"
+                f"text-transform:uppercase;color:#1e293b'>{group_label}</span>"
+                f"</div>"
+                f"<div style='flex:1'>{bars}</div>"
+                f"</div>"
+            )
+
         col_img, col_info = st.columns([1, 4])
         with col_img:
             if saved_photo:
@@ -3296,8 +3516,8 @@ with tab_card:
                 bio_parts.append(p_data["HEIGHT"])
             if _weight:
                 bio_parts.append(_weight)
-            if _position:
-                bio_parts.append(_position)
+            if _player_pos_group:
+                bio_parts.append(_player_pos_group)
             if _display_class:
                 bio_parts.append(_display_class)
             st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
@@ -3344,27 +3564,9 @@ with tab_card:
                     "</tr>"
                 )
 
-            _conf_map = build_team_conf_map(df_all)
-            _own_conf = p_data["CONF"]
-            _in_conf_ids = tuple(sorted(eid for eid, c in _conf_map.items() if c == _own_conf))
-
-            _conf_row = _non_conf_row = None
-            if _in_conf_ids:
-                _conf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids)
-                _cr = _conf_box[_conf_box["PLAYER"] == current_player]
-                _conf_row = _cr.iloc[0] if not _cr.empty else None
-
-                _nonconf_box = load_consistent_boxscore_stats(conf_ids=_in_conf_ids, exclude_conf_ids=True)
-                _ncr = _nonconf_box[_nonconf_box["PLAYER"] == current_player]
-                _non_conf_row = _ncr.iloc[0] if not _ncr.empty else None
-
-            _top100_box = load_consistent_boxscore_stats(max_opp_rank=100)
-            _t100r = _top100_box[_top100_box["PLAYER"] == current_player]
-            _top100_row = _t100r.iloc[0] if not _t100r.empty else None
-
-            _top50_box = load_consistent_boxscore_stats(max_opp_rank=50)
-            _t50r = _top50_box[_top50_box["PLAYER"] == current_player]
-            _top50_row = _t50r.iloc[0] if not _t50r.empty else None
+            # top50_row is used by build_combo_tags hero section below; set None since
+            # we no longer load that split here (combo_tags handles None gracefully).
+            _top50_row = None
 
             _stats_table_style = (
                 "<style>.card-stats-table{width:100%;border-collapse:separate;border-spacing:0;"
@@ -3384,29 +3586,128 @@ with tab_card:
                 "</tr></thead><tbody>"
             )
 
-            # Season is the number a coach wants first - shown plain, no extra clicks.
-            st.markdown(
-                _stats_table_style + _stats_table_row("Season", _hdr) + "</tbody></table>",
-                unsafe_allow_html=True,
+            # ── Four-row split table: Season / Quad 1 / Quad 1-2 / Conference ──
+            # Season row uses _hdr (covers all players via game logs).
+            # Quad/conf rows use cbb_player_agg (UCLA players only; dashes for others).
+            _cbb_agg_all = load_cbb_player_agg()
+
+            def _split_row_hdr(row_label, r):
+                """Build a table row from an _hdr-style row (already per-game averages)."""
+                if r is None:
+                    return f"<tr><td>{row_label}</td>" + "<td>-</td>" * 16 + "</tr>"
+                def _f(v, dec=1):
+                    try:
+                        return f"{float(v):.{dec}f}" if v is not None and str(v) not in ("", "nan", "None") else "-"
+                    except (TypeError, ValueError):
+                        return "-"
+                def _pf(v):
+                    try:
+                        return f"{float(v):.1f}%" if v is not None and str(v) not in ("", "nan", "None") else "-"
+                    except (TypeError, ValueError):
+                        return "-"
+                return (
+                    f"<tr><td style='font-weight:700'>{row_label}</td>"
+                    f"<td>{_f(r.get('GP'), 0)}</td>"
+                    f"<td>{_f(r.get('MPG'))}</td>"
+                    f"<td>{_f(r.get('PPG'))}</td>"
+                    f"<td>{_f(r.get('RPG'))}</td>"
+                    f"<td>{_f(r.get('APG'))}</td>"
+                    f"<td>{_f(r.get('SPG'))}</td>"
+                    f"<td>{_f(r.get('BPG'))}</td>"
+                    f"<td>{_pf(r.get('FG_PCT'))}</td>"
+                    f"<td>{_pf(r.get('TS'))}</td>"
+                    f"<td>{_pf(r.get('TWO_P'))}</td>"
+                    f"<td>{_pf(r.get('THREE_P'))}</td>"
+                    f"<td>{_pf(r.get('FT_PCT'))}</td>"
+                    f"<td>{_pf(r.get('USG'))}</td>"
+                    f"<td>{_pf(r.get('AST_PCT'))}</td>"
+                    f"<td>{_pf(r.get('OR_PCT'))}</td>"
+                    f"<td>{_pf(r.get('DR_PCT'))}</td>"
+                    "</tr>"
+                )
+
+            def _split_row_cbb(row_label, r):
+                """Build a table row from a cbb_player_agg row (cumulative totals, divide by GP)."""
+                if r is None:
+                    return f"<tr><td>{row_label}</td>" + "<td>-</td>" * 16 + "</tr>"
+                try:
+                    gp = int(r.get("gp") or 0)
+                except (TypeError, ValueError):
+                    gp = 0
+                if gp == 0:
+                    return f"<tr><td>{row_label}</td>" + "<td>-</td>" * 16 + "</tr>"
+
+                def _pg(col):
+                    try:
+                        return f"{float(r.get(col) or 0) / gp:.1f}"
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        return "-"
+
+                def _pf(col, scale=100):
+                    try:
+                        v = float(r.get(col))
+                        return f"{v * scale:.1f}%"
+                    except (TypeError, ValueError):
+                        return "-"
+
+                return (
+                    f"<tr><td style='font-weight:700'>{row_label}</td>"
+                    f"<td>{gp}</td>"
+                    f"<td>{_pg('mins')}</td>"
+                    f"<td>{_pg('pts')}</td>"
+                    f"<td>{_pg('reb')}</td>"
+                    f"<td>{_pg('ast')}</td>"
+                    f"<td>{_pg('stl')}</td>"
+                    f"<td>{_pg('blk')}</td>"
+                    f"<td>{_pf('fg_pct')}</td>"
+                    f"<td>{_pf('ts_pct')}</td>"
+                    f"<td>{_pf('fg2_pct')}</td>"
+                    f"<td>{_pf('fg3_pct')}</td>"
+                    f"<td>{_pf('ft_pct')}</td>"
+                    f"<td>{_pf('usage_pct')}</td>"
+                    f"<td>{_pf('ast_pct')}</td>"
+                    f"<td>{_pf('orb_pct')}</td>"
+                    f"<td>{_pf('drb_pct')}</td>"
+                    "</tr>"
+                )
+
+            def _get_cbb_row(scope):
+                sdf = _cbb_agg_all[
+                    (_cbb_agg_all["player_name"] == current_player) &
+                    (_cbb_agg_all["scope"] == scope)
+                ]
+                return sdf.iloc[0].to_dict() if not sdf.empty else None
+
+            # For Season row: use cbb_player_agg if available (more accurate rebounding pcts),
+            # falling back to _hdr for players not in cbb (portal targets).
+            _cbb_season_row = _get_cbb_row("season")
+            _split_rows_html = (
+                (_split_row_cbb("Season", _cbb_season_row) if _cbb_season_row else _split_row_hdr("Season", _hdr))
+                + _split_row_cbb("Quad 1",     _get_cbb_row("quad1"))
+                + _split_row_cbb("Quad 1-2",   _get_cbb_row("quad12"))
+                + _split_row_cbb("Conference", _get_cbb_row("confAll"))
             )
 
-            _has_splits = _conf_row is not None or _non_conf_row is not None
-            with st.expander("Expanded Season Stats (conference, non-conference, vs Top 100/50)"):
-                if _has_splits:
-                    _split_rows_html = (
-                        _stats_table_row("Conference", _conf_row)
-                        + _stats_table_row("Non-Conf", _non_conf_row)
-                        + _stats_table_row("vs Top 100", _top100_row)
-                        + _stats_table_row("vs Top 50", _top50_row)
-                    )
-                else:
-                    _split_rows_html = (
-                        _stats_table_row("vs Top 100", _top100_row)
-                        + _stats_table_row("vs Top 50", _top50_row)
-                    )
-                st.markdown(_stats_table_style + _split_rows_html + "</tbody></table>", unsafe_allow_html=True)
-                if not _has_splits:
-                    st.caption("Conference/Non-Conference split unavailable - couldn't match this team's conference to game log opponents.")
+            st.markdown(
+                "<style>.split-table{width:100%;border-collapse:separate;border-spacing:0;"
+                "font-size:0.83rem;margin-top:10px;border:1px solid #E2E8F0;border-radius:8px;overflow:hidden;}"
+                ".split-table th{text-align:center;padding:8px 5px;color:#fff;font-size:0.65rem;"
+                "font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:#2D68C4;}"
+                ".split-table td{text-align:center;padding:8px 5px;border-bottom:1px solid #F1F5F9;"
+                "font-weight:600;color:#1B3E76;}"
+                ".split-table tr:last-child td{border-bottom:none;}"
+                ".split-table tr:nth-child(even) td{background:#F8FAFC;}"
+                ".split-table td:first-child{text-align:left;padding-left:12px;font-weight:800;color:#0F172A;min-width:90px;}"
+                "</style>"
+                "<table class='split-table'><thead><tr>"
+                "<th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th>"
+                "<th>SPG</th><th>BPG</th><th>FG%</th><th>TS%</th>"
+                "<th>2P%</th><th>3P%</th><th>FT%</th><th>USG%</th><th>AST%</th><th>OR%</th><th>DR%</th>"
+                "</tr></thead><tbody>"
+                + _split_rows_html
+                + "</tbody></table>",
+                unsafe_allow_html=True,
+            )
 
         # ── HERO: the one number and the auto-generated strengths a coach sees first,
         # after the main stat line and splits. PPG because it's the one stat every coach
@@ -3527,19 +3828,65 @@ with tab_card:
                         return None
                 return national_pct(col, val, card_benchmarks)
 
+            # Load PBP zone data early so shot-type values are available for the stat cards
+            _pbp_all_early = load_cbb_pbp_zones()
+            _pbp_bm = build_pbp_benchmarks()
+            _pbp_pe = _pbp_all_early[
+                (_pbp_all_early["player_name"] == current_player) &
+                (_pbp_all_early["scope"] == "season")
+            ] if not _pbp_all_early.empty else pd.DataFrame()
+            if not _pbp_pe.empty:
+                if len(_pbp_pe) > 1 and "fga" in _pbp_pe.columns:
+                    _pbp_pe = _pbp_pe.sort_values("fga", ascending=False)
+                _pbp_re = _pbp_pe.iloc[0]
+                def _pval(col):
+                    try:
+                        v = _pbp_re.get(col)
+                        return float(v) if v is not None and str(v) not in ("", "nan", "None") else None
+                    except (TypeError, ValueError):
+                        return None
+                def _pbp_pct(col):
+                    v = _pval(col)
+                    vals = _pbp_bm.get(col)
+                    if v is None or not vals:
+                        return None
+                    return get_pct(v, vals)
+                _sc_rim_pct  = (_pval("atr2_fg_pct")   or 0) * 100
+                _sc_rim_freq = (_pval("atr2_fga_freq")  or 0) * 100
+                _sc_mid_pct  = (_pval("mid2_fg_pct")    or 0) * 100
+                _sc_mid_freq = (_pval("mid2_fga_freq")  or 0) * 100
+                _sc_3p_freq  = (_pval("fga3_rate")      or 0) * 100
+                _sc_ft_pct   = (_pval("ft_pct")         or 0) * 100
+            else:
+                _pval = lambda col: None
+                _pbp_pct = lambda col: None
+                _sc_rim_pct = _sc_rim_freq = _sc_mid_pct = _sc_mid_freq = _sc_3p_freq = _sc_ft_pct = None
+
             eff_html = _cat_table("Efficiency", [
                 _stat_row_colored("ORTG",  _bt.get("ORTG"),  _bt_pct("ORTG",  _bt.get("ORTG"))),
                 _stat_row_colored("USG%",  _hdr.get("USG"),  _box_pct("USG",  _hdr.get("USG")),  "%"),
                 _stat_row_colored("TS%",   _hdr.get("TS"),   _box_pct("TS",   _hdr.get("TS")),   "%"),
-                _stat_row_colored("EFG%",  _hdr.get("EFG"),  _box_pct("EFG",  _hdr.get("EFG")),  "%"),
+                _stat_row_colored("OBPM",  p_data.get("OBPM"), _bt_pct("OBPM", p_data.get("OBPM")), "", 1),
             ])
 
+            # RAPM/WARP from cbb_player_agg (UCLA players only; dashes otherwise)
+            _cbb_ir = _cbb_agg_all[
+                (_cbb_agg_all["player_name"] == current_player) &
+                (_cbb_agg_all["scope"] == "season")
+            ]
+            _cbb_impact = _cbb_ir.iloc[0].to_dict() if not _cbb_ir.empty else {}
+
+            def _rapm_pct(val, lo=-5, hi=5):
+                try:
+                    return max(0.0, min(100.0, (float(val) - lo) / (hi - lo) * 100))
+                except (TypeError, ValueError):
+                    return None
+
             imp_html = _cat_table("Impact", [
-                _stat_row_colored("PRPG",  _bt.get("PRPG"),  _bt_pct("PRPG",  _bt.get("PRPG"))),
-                _stat_row_colored("BPM",   _bt.get("BPM"),   _bt_pct("BPM",   _bt.get("BPM"))),
-                _stat_row_colored("OBPM",  _bt.get("OBPM"),  _bt_pct("OBPM",  _bt.get("OBPM"))),
-                _stat_row_colored("DBPM",  _bt.get("DBPM"),  _bt_pct("DBPM",  _bt.get("DBPM"))),
-                _stat_row_colored("MIN%",  _bt.get("MIN_PCT"), _bt_pct("MIN_PCT", _bt.get("MIN_PCT")), "%"),
+                _stat_row_colored("RAPM",  _cbb_impact.get("rapm"),  _rapm_pct(_cbb_impact.get("rapm"))),
+                _stat_row_colored("oRAPM", _cbb_impact.get("orapm"), _rapm_pct(_cbb_impact.get("orapm"))),
+                _stat_row_colored("dRAPM", _cbb_impact.get("drapm"), _rapm_pct(_cbb_impact.get("drapm"))),
+                _stat_row_colored("BPM",   p_data.get("BPM"),        _box_pct("BPM",  p_data.get("BPM")),  "", 1),
             ])
 
             play_html = _cat_table("Playmaking", [
@@ -3549,13 +3896,28 @@ with tab_card:
                 _stat_row_colored("USG%",   _hdr.get("USG"),     _box_pct("USG",     _hdr.get("USG")),     "%"),
             ])
 
-            shoot_html = _cat_table("Shooting", [
-                _stat_row_colored("TS%",     _hdr.get("TS"),       _box_pct("TS",      _hdr.get("TS")),      "%"),
-                _stat_row_colored("2P%",     _hdr.get("TWO_P"),    _box_pct("TWO_P",   _hdr.get("TWO_P")),   "%"),
-                _stat_row_colored("3P%",     _hdr.get("THREE_P"),  _box_pct("THREE_P", _hdr.get("THREE_P")), "%"),
-                _stat_row_colored("3P Rate", _bt.get("THREE_P_100"), _bt_pct("THREE_P_100", _bt.get("THREE_P_100")), " /100"),
-                _stat_row_colored("FT%",     _hdr.get("FT_PCT"),   _box_pct("FT_PCT",  _hdr.get("FT_PCT")),  "%"),
-                _stat_row_colored("FTR",     _hdr.get("FTR"),      _box_pct("FTR",     _hdr.get("FTR")),     "%"),
+            _ft_pct_val = _sc_ft_pct if _sc_ft_pct is not None else _hdr.get("FT_PCT")
+            _ft_pct_col = _pbp_pct("ft_pct") or _box_pct("FT_PCT", _hdr.get("FT_PCT"))
+            shoot_html = _cat_table("Shot Types", [
+                _shot_group("Rim", [
+                    ("FG%",  _sc_rim_pct,         _pbp_pct("atr2_fg_pct"),                   "%"),
+                    ("Freq", _sc_rim_freq,         _pbp_pct("atr2_fga_freq"),                 "%"),
+                ]),
+                _divider_row(),
+                _shot_group("Mid", [
+                    ("FG%",  _sc_mid_pct,          _pbp_pct("mid2_fg_pct"),                   "%"),
+                    ("Freq", _sc_mid_freq,          _pbp_pct("mid2_fga_freq"),                 "%"),
+                ]),
+                _divider_row(),
+                _shot_group("3PT", [
+                    ("FG%",  _hdr.get("THREE_P"),  _box_pct("THREE_P", _hdr.get("THREE_P")), "%"),
+                    ("Freq", _sc_3p_freq,           _pbp_pct("fga3_rate"),                    "%"),
+                ]),
+                _divider_row(),
+                _shot_group("FT", [
+                    ("FT%",  _ft_pct_val,           _ft_pct_col,                              "%"),
+                    ("Freq", _hdr.get("FTR"),       _box_pct("FTR", _hdr.get("FTR")),        "%"),
+                ]),
             ])
 
             reb_html = _cat_table("Rebounding", [
@@ -3582,23 +3944,11 @@ with tab_card:
 
         curated_player = next((p for p in PORTAL_PLAYERS if p["name"] == current_player), None)
 
-        st.write("**Competition Split**")
-
-        _split = st.radio(
-            "Competition split",
-            ["All Games", "Top 100", "Top 50"],
-            horizontal=True,
-            key="profile_split",
-            label_visibility="collapsed",
-        )
-
-        _max_rank = None if _split == "All Games" else (100 if _split == "Top 100" else 50)
-
         if not _gl_ready:
             st.info("Run `python3 build_game_logs.py` to enable the shot chart.")
         else:
-            _box_df = load_consistent_boxscore_stats(_max_rank)
-            _pbox = _box_df[_box_df["PLAYER"] == current_player]
+            _pbox = load_consistent_boxscore_stats()
+            _pbox = _pbox[_pbox["PLAYER"] == current_player]
             if len(_pbox) > 1:
                 _bt_team = p_data["TEAM"]
                 _team_match = _pbox[_pbox["TEAM"].str.contains(_bt_team, case=False, na=False)]
@@ -3610,12 +3960,127 @@ with tab_card:
             _shots = load_player_shots(current_player, _team_id)
             if not _shots.empty:
                 st.write("**Shot Chart**")
-                _chart_title = f"{current_player}  ·  {_split}"
-                _fig = draw_shot_chart(_shots, title=_chart_title)
+                _fig = draw_shot_chart(_shots, title=current_player)
                 col_chart, col_gap = st.columns([3, 2])
                 with col_chart:
                     st.pyplot(_fig, use_container_width=True)
                 plt.close(_fig)
+
+            # ── Shot Zone Court Diagram ──────────────────────────────────────
+            st.markdown("**Shot Zone Profile**")
+            _pbp_all = load_cbb_pbp_zones()
+            _pbp_player = _pbp_all[
+                (_pbp_all["player_name"] == current_player) &
+                (_pbp_all["scope"] == "season")
+            ] if not _pbp_all.empty else pd.DataFrame()
+            if not _pbp_player.empty:
+                # If multiple rows, take highest fga
+                if len(_pbp_player) > 1 and "fga" in _pbp_player.columns:
+                    _pbp_player = _pbp_player.sort_values("fga", ascending=False)
+                _pbp_r = _pbp_player.iloc[0]
+                def _zone_val(col, default=0.0):
+                    try:
+                        return float(_pbp_r.get(col) or default)
+                    except (TypeError, ValueError):
+                        return default
+
+                _atr_freq   = _zone_val("atr2_fga_freq")
+                _atr_pct    = _zone_val("atr2_fg_pct")
+                _paint_freq = _zone_val("paint2_fga_freq")
+                _paint_pct  = _zone_val("paint2_fg_pct")
+                _mid_freq   = _zone_val("mid2_fga_freq")
+                _mid_pct    = _zone_val("mid2_fg_pct")
+                _c3l_freq   = _zone_val("c3_fga_freq")
+                _c3l_pct    = _zone_val("c3_fg_pct")
+                _atb_freq   = _zone_val("atb3_fga_freq")
+                _atb_pct    = _zone_val("atb3_fg_pct")
+
+                def _zone_color(fg_pct):
+                    # fg_pct is 0-1; map to 0-100 percentile approx
+                    return pct_color(fg_pct * 100)
+
+                def _freq_label(f):
+                    return f"{f * 100:.0f}%"
+
+                def _pct_label(p):
+                    return f"{p * 100:.1f}%"
+
+                _atr_bg,   _atr_fg   = _zone_color(_atr_pct)
+                _paint_bg, _paint_fg = _zone_color(_paint_pct)
+                _mid_bg,   _mid_fg   = _zone_color(_mid_pct)
+                _c3l_bg,   _c3l_fg   = _zone_color(_c3l_pct)
+                _atb_bg,   _atb_fg   = _zone_color(_atb_pct)
+
+                _zone_svg = f"""
+<svg viewBox="0 0 400 340" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:420px;display:block;margin:0 auto;">
+  <!-- Court background -->
+  <rect x="0" y="0" width="400" height="340" fill="#1a3a5c" rx="8"/>
+  <!-- Outer boundary -->
+  <rect x="20" y="10" width="360" height="320" fill="none" stroke="#e0e0e0" stroke-width="2"/>
+  <!-- Paint / key -->
+  <rect x="145" y="10" width="110" height="145" fill="none" stroke="#e0e0e0" stroke-width="1.5"/>
+  <!-- Free throw circle -->
+  <circle cx="200" cy="155" r="30" fill="none" stroke="#e0e0e0" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <!-- Basket -->
+  <circle cx="200" cy="42" r="8" fill="none" stroke="#e0e0e0" stroke-width="2"/>
+  <line x1="190" y1="30" x2="210" y2="30" stroke="#e0e0e0" stroke-width="2"/>
+  <!-- Three-point arc -->
+  <path d="M 47 10 L 47 120 A 158 158 0 0 0 353 120 L 353 10" fill="none" stroke="#e0e0e0" stroke-width="1.5"/>
+
+  <!-- ZONE: Corner 3 Left -->
+  <rect x="20" y="10" width="27" height="110" fill="{_c3l_bg}" fill-opacity="0.82"/>
+  <text x="33" y="58" text-anchor="middle" font-size="13" font-weight="800" fill="{_c3l_fg}" font-family="DM Mono,monospace">{_freq_label(_c3l_freq)}</text>
+  <text x="33" y="74" text-anchor="middle" font-size="9" fill="{_c3l_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_c3l_pct)}</text>
+  <text x="33" y="90" text-anchor="middle" font-size="8" fill="{_c3l_fg}" opacity="0.75" font-family="system-ui,sans-serif">C3L</text>
+
+  <!-- ZONE: Corner 3 Right -->
+  <rect x="353" y="10" width="27" height="110" fill="{_c3l_bg}" fill-opacity="0.82"/>
+  <text x="366" y="58" text-anchor="middle" font-size="13" font-weight="800" fill="{_c3l_fg}" font-family="DM Mono,monospace">{_freq_label(_c3l_freq)}</text>
+  <text x="366" y="74" text-anchor="middle" font-size="9" fill="{_c3l_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_c3l_pct)}</text>
+  <text x="366" y="90" text-anchor="middle" font-size="8" fill="{_c3l_fg}" opacity="0.75" font-family="system-ui,sans-serif">C3R</text>
+
+  <!-- ZONE: Above-the-break 3 (arc area, wings) -->
+  <path d="M 47 120 A 158 158 0 0 0 353 120 L 353 10 L 47 10 Z" fill="{_atb_bg}" fill-opacity="0.75"/>
+  <!-- Overlay paint and corner zones on top to avoid color bleed -->
+  <rect x="20" y="10" width="27" height="110" fill="{_c3l_bg}" fill-opacity="0.82"/>
+  <rect x="353" y="10" width="27" height="110" fill="{_c3l_bg}" fill-opacity="0.82"/>
+  <!-- ATB label -->
+  <text x="200" y="232" text-anchor="middle" font-size="13" font-weight="800" fill="{_atb_fg}" font-family="DM Mono,monospace">{_freq_label(_atb_freq)}</text>
+  <text x="200" y="248" text-anchor="middle" font-size="9" fill="{_atb_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_atb_pct)}</text>
+  <text x="200" y="264" text-anchor="middle" font-size="8" fill="{_atb_fg}" opacity="0.75" font-family="system-ui,sans-serif">ATB 3</text>
+
+  <!-- ZONE: Paint (non-rim 2s) -->
+  <rect x="145" y="70" width="110" height="85" fill="{_paint_bg}" fill-opacity="0.85"/>
+  <text x="200" y="108" text-anchor="middle" font-size="13" font-weight="800" fill="{_paint_fg}" font-family="DM Mono,monospace">{_freq_label(_paint_freq)}</text>
+  <text x="200" y="124" text-anchor="middle" font-size="9" fill="{_paint_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_paint_pct)}</text>
+  <text x="200" y="140" text-anchor="middle" font-size="8" fill="{_paint_fg}" opacity="0.75" font-family="system-ui,sans-serif">Paint</text>
+
+  <!-- ZONE: Mid-range (between paint and arc, non-corner) -->
+  <path d="M 47 120 A 158 158 0 0 0 353 120 L 255 120 L 255 155 A 30 30 0 0 1 145 155 L 145 120 Z" fill="{_mid_bg}" fill-opacity="0.80"/>
+  <text x="88" y="168" text-anchor="middle" font-size="12" font-weight="800" fill="{_mid_fg}" font-family="DM Mono,monospace">{_freq_label(_mid_freq / 2)}</text>
+  <text x="88" y="183" text-anchor="middle" font-size="9" fill="{_mid_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_mid_pct)}</text>
+  <text x="88" y="197" text-anchor="middle" font-size="8" fill="{_mid_fg}" opacity="0.75" font-family="system-ui,sans-serif">Mid</text>
+  <text x="312" y="168" text-anchor="middle" font-size="12" font-weight="800" fill="{_mid_fg}" font-family="DM Mono,monospace">{_freq_label(_mid_freq / 2)}</text>
+  <text x="312" y="183" text-anchor="middle" font-size="9" fill="{_mid_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_mid_pct)}</text>
+  <text x="312" y="197" text-anchor="middle" font-size="8" fill="{_mid_fg}" opacity="0.75" font-family="system-ui,sans-serif">Mid</text>
+
+  <!-- ZONE: At-rim circle -->
+  <circle cx="200" cy="42" r="28" fill="{_atr_bg}" fill-opacity="0.90"/>
+  <text x="200" y="38" text-anchor="middle" font-size="13" font-weight="800" fill="{_atr_fg}" font-family="DM Mono,monospace">{_freq_label(_atr_freq)}</text>
+  <text x="200" y="52" text-anchor="middle" font-size="9" fill="{_atr_fg}" opacity="0.9" font-family="DM Mono,monospace">{_pct_label(_atr_pct)}</text>
+  <text x="200" y="64" text-anchor="middle" font-size="8" fill="{_atr_fg}" opacity="0.75" font-family="system-ui,sans-serif">Rim</text>
+
+  <!-- Redraw court lines on top -->
+  <rect x="20" y="10" width="360" height="320" fill="none" stroke="#e0e0e0" stroke-width="2"/>
+  <rect x="145" y="10" width="110" height="145" fill="none" stroke="#e0e0e0" stroke-width="1.5"/>
+  <circle cx="200" cy="155" r="30" fill="none" stroke="#e0e0e0" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <circle cx="200" cy="42" r="8" fill="none" stroke="#e0e0e0" stroke-width="2"/>
+  <line x1="190" y1="30" x2="210" y2="30" stroke="#e0e0e0" stroke-width="2"/>
+  <path d="M 47 10 L 47 120 A 158 158 0 0 0 353 120 L 353 10" fill="none" stroke="#e0e0e0" stroke-width="1.5"/>
+</svg>"""
+                components.html(_zone_svg, height=360, scrolling=False)
+            else:
+                st.caption("No zone data available for this player.")
 
         st.divider()
 
