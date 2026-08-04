@@ -2690,10 +2690,10 @@ POS_TAG_BUCKET = {
 
 # ==========================================
 # FRONT OFFICE TARGET BOARD - position rows (per front office request: PG, CG, Wing,
-# Four, Big, Shooting Big), used to group the board and tag a player's primary position
-# grouping in their scouting report.
+# Four, Big), used to group the board and tag a player's primary position grouping in
+# their scouting report.
 # ==========================================
-BOARD_POSITIONS = ["PG", "CG", "Wing", "Four", "Big", "Shooting Big"]
+BOARD_POSITIONS = ["PG", "CG", "Wing", "Four", "Big"]
 
 # International scouting notes use numeric positions (1-5, e.g. "3/4") - map those onto
 # the same 6-bucket Big Board taxonomy so a report can go straight onto the board.
@@ -2709,9 +2709,7 @@ def _intl_pos_to_board(pos: str) -> str:
 # fold those old values into the closest new bucket instead of losing the target.
 LEGACY_BOARD_POS_MAP = {"W": "Wing", "F": "Four", "C": "Big"}
 
-# BartTorvik's own position tag, mapped onto the 6-bucket board taxonomy. Covers 5 of
-# the 6 buckets directly - "Shooting Big" (a floor-spacing 5) isn't something a raw tag
-# or height can safely infer, so that one stays a manual coach call.
+# BartTorvik's own position tag, mapped onto the 5-bucket board taxonomy.
 _POS_TAG_TO_BOARD = {
     "Pure PG": "PG", "Scoring PG": "PG",
     "Combo G": "CG",
@@ -5137,34 +5135,26 @@ with tab_card:
         if _survey_row:
             _survey = dict(_survey_row)
             _survey_score = sum(int(_survey.get(k) or 0) for k, *_ in SURVEY_CATEGORIES)
+            _survey_priority = _survey.get("recruiting_priority") or "-"
+            _survey_bucket = _survey.get("recruit_bucket") or "-"
+            _priority_color = SURVEY_PRIORITY_COLORS.get(_survey_priority, "#64748B")
 
-            def _survey_tile(label, value, rating):
-                bg, fg = pct_color((rating - 1) / 4 * 100)
-                return (
-                    "<div style=\"flex:1;min-width:110px;padding:6px 8px;text-align:center;background:" + bg + ";"
-                    "border-radius:5px;margin:2px;\">"
-                    "<div style=\"font-size:11px;font-weight:700;color:" + fg + ";\">" + value + "</div>"
-                    "<div style=\"font-size:8px;color:" + fg + ";opacity:.8;text-transform:uppercase;margin-top:1px;\">"
-                    + label + "</div></div>"
-                )
-
-            _survey_tiles_html = "".join(
-                _survey_tile(title, labels[int(_survey.get(key) or 3) - 1], int(_survey.get(key) or 3))
-                for key, title, _q, labels in SURVEY_CATEGORIES
-            )
+            # Just the three headline calls a coach needs at a glance - bucket, overall
+            # score, recruiting priority - not the full 8-category breakdown (that lives
+            # in the Notes section's "Full survey responses" for whoever wants to dig in).
             st.markdown(
-                "<div style=\"margin:12px 0;padding:10px 12px;border:1px solid #dde2ee;"
+                "<div style=\"margin:12px 0;padding:12px 14px;border:1px solid #dde2ee;"
                 "border-left:4px solid #2D68C4;border-radius:8px;background:#fafbfc;\">"
-                "<div style=\"display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;\">"
                 "<div style=\"font-size:12px;font-weight:800;color:#111827;text-transform:uppercase;"
-                "letter-spacing:.04em;\">🎯 Recruit Alignment Survey</div>"
-                "<span style=\"font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;"
-                "background:#e8f1f9;color:#2D68C4;border:1px solid #b8d3ec;\">"
-                + str(_survey_score) + "/40 · " + str(_survey.get("recruiting_priority") or "-") + "</span>"
+                "letter-spacing:.04em;margin-bottom:8px;\">&#127919; Recruit Alignment Survey</div>"
+                "<div style=\"display:flex;gap:10px;flex-wrap:wrap;\">"
+                f"<span style=\"background:{_priority_color}1A;color:{_priority_color};border:1px solid {_priority_color}55;"
+                f"padding:4px 10px;border-radius:5px;font-size:11px;font-weight:700;\">{_survey_score}/40 Alignment Score</span>"
+                f"<span style=\"background:{_priority_color}1A;color:{_priority_color};border:1px solid {_priority_color}55;"
+                f"padding:4px 10px;border-radius:5px;font-size:11px;font-weight:700;\">{_survey_priority}</span>"
+                f"<span style=\"background:#eef3fb;color:#2D68C4;border:1px solid #cfe0f5;"
+                f"padding:4px 10px;border-radius:5px;font-size:11px;font-weight:700;\">{_survey_bucket}</span>"
                 "</div>"
-                "<div style=\"font-size:10px;color:#6b7280;margin-bottom:6px;\">"
-                + str(_survey.get("recruit_bucket") or "") + "</div>"
-                "<div style=\"display:flex;flex-wrap:wrap;\">" + _survey_tiles_html + "</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
@@ -6388,23 +6378,23 @@ with tab3:
         st.info("No targets currently logged onto the system database. Add a target from the "
                  "**Big Board Status** section on any player's Individual Player Stats page.")
     else:
-        col_search, col_tier_f, col_val_f = st.columns([2, 1, 1])
+        _class_lookup = dict(zip(df_all["PLAYER"], df_all["CLASS"]))
+        db_df["CLASS"] = db_df["PLAYER"].map(_class_lookup)
+
+        col_search, col_class_f = st.columns([2, 1])
         with col_search:
             _board_q = st.text_input("Search by player or school:", key="board_search_q").strip().lower()
-        with col_tier_f:
-            _board_tier_f = st.multiselect("Priority", TIER_OPTIONS, key="board_tier_f")
-        with col_val_f:
-            _board_val_f = st.multiselect("Value Tag", VALUE_TAG_OPTIONS, key="board_val_f")
+        with col_class_f:
+            _class_opts = [c for c in ["Fr", "So", "Jr", "Sr"] if c in set(db_df["CLASS"].dropna())]
+            _board_class_f = st.multiselect("Year of Eligibility", _class_opts, key="board_class_f")
 
         if _board_q:
             db_df = db_df[
                 db_df["PLAYER"].str.lower().str.contains(_board_q, na=False)
                 | db_df["TEAM"].fillna("").str.lower().str.contains(_board_q, na=False)
             ]
-        if _board_tier_f:
-            db_df = db_df[db_df["TIER"].isin(_board_tier_f)]
-        if _board_val_f:
-            db_df = db_df[db_df["VALUE TAG"].isin(_board_val_f)]
+        if _board_class_f:
+            db_df = db_df[db_df["CLASS"].isin(_board_class_f)]
 
         db_df["BOARD_POS"] = db_df["POS"].map(lambda v: LEGACY_BOARD_POS_MAP.get(v, v) if v else None)
         _board_benchmarks = build_national_benchmarks(df_all)
@@ -6496,7 +6486,7 @@ with tab3:
         with st.expander("Print Big Board"):
             components.html(_build_board_print_html(board_groups), height=600, scrolling=True)
 
-        _board_filters_active = bool(_board_q or _board_tier_f or _board_val_f)
+        _board_filters_active = bool(_board_q or _board_class_f)
         for pos in display_positions:
             group_df = board_groups[pos]
             st.markdown(f"### {pos} ({len(group_df)})")
