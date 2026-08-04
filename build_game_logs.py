@@ -16,6 +16,7 @@ Tables written to scouting_hub.db:
 """
 
 import json
+import re
 import requests
 import sqlite3
 import time
@@ -338,6 +339,62 @@ def _norm_team_str(s):
     # never match), and drop punctuation so "St." vs "St" vs "-" all compare equal.
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     return s.lower().replace(".", "").replace("-", " ")
+
+
+def _norm_person_name(s):
+    # Same idea as _norm_team_str but stricter (drops spaces/commas too, not
+    # just periods/dashes) - player-name variants show up as "AJ" vs "A.J.",
+    # "Jason Thirdkill, Jr." vs "Jason Thirdkill Jr.", "Jalen St Clair" vs
+    # "Jalen StClair", accented letters, etc.
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def reconcile_player_names(conn):
+    """Auto-heal punctuation/accent-only name mismatches between BartTorvik
+    (torvik_player_season - the canonical spelling used everywhere in the UI)
+    and player_game_logs (ESPN-sourced box scores), e.g. "AJ Staton-McCray" vs
+    "A.J. Staton-McCray". Left un-reconciled, a coach's stat card silently goes
+    blank for that player since every join in app.py matches by exact name.
+
+    Runs every time this script runs (not a one-off fix) so a newly-added
+    player with the same kind of spelling drift self-heals on the next data
+    refresh instead of needing someone to notice and patch it by hand.
+
+    Only renames when the stripped-down name matches EXACTLY ONE BartTorvik
+    player. Multiple matches means real, different people who happen to
+    normalize the same (e.g. two unrelated "Shawn Jones Jr."s at different
+    schools) - those get left alone rather than guessed at.
+    """
+    has_torvik = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='torvik_player_season'"
+    ).fetchone()
+    if not has_torvik:
+        return
+    canonical = {r[0] for r in conn.execute("SELECT DISTINCT PLAYER FROM torvik_player_season").fetchall()}
+    if not canonical:
+        return
+    gamelog_names = {r[0] for r in conn.execute("SELECT DISTINCT player_name FROM player_game_logs").fetchall()}
+
+    canon_by_norm = {}
+    for c in canonical:
+        canon_by_norm.setdefault(_norm_person_name(c), []).append(c)
+
+    renamed = 0
+    for name in gamelog_names - canonical:
+        targets = canon_by_norm.get(_norm_person_name(name))
+        if not targets or len(targets) > 1:
+            continue
+        canonical_name = targets[0]
+        if canonical_name in gamelog_names:
+            # Canonical spelling already exists as its OWN separate row set -
+            # merging would combine two different players' games together.
+            continue
+        conn.execute("UPDATE player_game_logs SET player_name = ? WHERE player_name = ?", (canonical_name, name))
+        renamed += 1
+    if renamed:
+        conn.commit()
+        print(f"  Reconciled {renamed} player_game_logs name spelling(s) to match BartTorvik.")
 
 
 def build_name_to_espn_id(bart_rankings, espn_teams):
@@ -701,6 +758,9 @@ def main():
         time.sleep(0.25)
 
     conn.commit()
+
+    print("Step 7: Reconciling player name spellings against BartTorvik...")
+    reconcile_player_names(conn)
     conn.close()
 
     n = sqlite3.connect(DB_PATH).execute("SELECT COUNT(*) FROM player_game_logs").fetchone()[0]
