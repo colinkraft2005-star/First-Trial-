@@ -2709,6 +2709,42 @@ def _intl_pos_to_board(pos: str) -> str:
 # fold those old values into the closest new bucket instead of losing the target.
 LEGACY_BOARD_POS_MAP = {"W": "Wing", "F": "Four", "C": "Big"}
 
+# BartTorvik's own position tag, mapped onto the 6-bucket board taxonomy. Covers 5 of
+# the 6 buckets directly - "Shooting Big" (a floor-spacing 5) isn't something a raw tag
+# or height can safely infer, so that one stays a manual coach call.
+_POS_TAG_TO_BOARD = {
+    "Pure PG": "PG", "Scoring PG": "PG",
+    "Combo G": "CG",
+    "Wing G": "Wing", "Wing F": "Wing",
+    "Stretch 4": "Four",
+    "PF/C": "Big", "C": "Big",
+}
+
+
+def infer_board_position(p_data) -> str:
+    """Best real-data guess at a player's Big Board position bucket - used whenever a
+    player lands on the board without ever having had a position explicitly set, instead
+    of silently defaulting everyone to PG regardless of whether they're actually a 6'10"
+    center. Prefers BartTorvik's own position tag; falls back to height."""
+    try:
+        raw_tag = str(p_data.get("POS_TAG", "")) if p_data is not None else ""
+    except Exception:
+        raw_tag = ""
+    if raw_tag in _POS_TAG_TO_BOARD:
+        return _POS_TAG_TO_BOARD[raw_tag]
+    try:
+        height_in = parse_height_inches(p_data.get("HEIGHT", "")) if p_data is not None else None
+    except Exception:
+        height_in = None
+    if height_in:
+        if height_in >= 82:   # 6'10"+
+            return "Big"
+        if height_in >= 79:   # 6'7"-6'9"
+            return "Four"
+        if height_in >= 76:   # 6'4"-6'6"
+            return "Wing"
+    return "CG"
+
 TIER_OPTIONS = ["High Priority", "Mid Priority", "Low Priority"]
 VALUE_TAG_OPTIONS = ["Undervalued", "Properly Valued", "Overvalued"]
 TIER_BADGE_COLORS = {"High Priority": "#F2A900", "Mid Priority": "#2D68C4", "Low Priority": "#94A3B8"}
@@ -2731,6 +2767,14 @@ RECRUIT_PRIORITY_OPTIONS = [
     "Monitor",
     "Pass",
 ]
+
+SURVEY_PRIORITY_COLORS = {
+    "Tier 1 Priority (All-in pursuit)": "#F2A900",
+    "Tier 2 Priority (Strong pursuit)": "#2D68C4",
+    "Continue Evaluating": "#64748B",
+    "Monitor": "#94A3B8",
+    "Pass": "#dc2626",
+}
 
 # (db column, short label for tags, full question, rung labels for 1-5)
 SURVEY_CATEGORIES = [
@@ -4362,13 +4406,13 @@ def render_player_notes_workspace(current_player, key_prefix="card"):
     ).fetchone()
     conn.close()
 
-    _saved_pos = _nb.get("position") or "PG"
+    _p_match = df_all[df_all["PLAYER"] == current_player]
+    _team_for_save = str(_p_match.iloc[0]["TEAM"]) if not _p_match.empty else (_nb.get("team_name") or "")
+
+    _saved_pos = _nb.get("position") or infer_board_position(_p_match.iloc[0] if not _p_match.empty else None)
     _saved_role = _nb.get("role") or ""
     _saved_tier = _nb.get("priority_tier") or "Mid Priority"
     _saved_value_tag = _nb.get("value_tag") or "Properly Valued"
-
-    _p_match = df_all[df_all["PLAYER"] == current_player]
-    _team_for_save = str(_p_match.iloc[0]["TEAM"]) if not _p_match.empty else (_nb.get("team_name") or "")
 
     # ---- Big Board Status ----
     st.markdown("#### Big Board Status")
@@ -4598,7 +4642,7 @@ with tab_card:
         db_row = cursor.fetchone()
 
         saved_tier      = db_row[0] if db_row and db_row[0] else "Mid Priority"
-        saved_pos       = db_row[1] if db_row and db_row[1] else "PG"
+        saved_pos       = db_row[1] if db_row and db_row[1] else infer_board_position(p_data)
         saved_photo     = db_row[2] if db_row else ""
         saved_value_tag = db_row[3] if db_row and db_row[3] else "Properly Valued"
 
@@ -6344,6 +6388,24 @@ with tab3:
         st.info("No targets currently logged onto the system database. Add a target from the "
                  "**Big Board Status** section on any player's Individual Player Stats page.")
     else:
+        col_search, col_tier_f, col_val_f = st.columns([2, 1, 1])
+        with col_search:
+            _board_q = st.text_input("Search by player or school:", key="board_search_q").strip().lower()
+        with col_tier_f:
+            _board_tier_f = st.multiselect("Priority", TIER_OPTIONS, key="board_tier_f")
+        with col_val_f:
+            _board_val_f = st.multiselect("Value Tag", VALUE_TAG_OPTIONS, key="board_val_f")
+
+        if _board_q:
+            db_df = db_df[
+                db_df["PLAYER"].str.lower().str.contains(_board_q, na=False)
+                | db_df["TEAM"].fillna("").str.lower().str.contains(_board_q, na=False)
+            ]
+        if _board_tier_f:
+            db_df = db_df[db_df["TIER"].isin(_board_tier_f)]
+        if _board_val_f:
+            db_df = db_df[db_df["VALUE TAG"].isin(_board_val_f)]
+
         db_df["BOARD_POS"] = db_df["POS"].map(lambda v: LEGACY_BOARD_POS_MAP.get(v, v) if v else None)
         _board_benchmarks = build_national_benchmarks(df_all)
 
@@ -6351,24 +6413,6 @@ with tab3:
         _conn_s.row_factory = sqlite3.Row
         _survey_rows = {r["player_name"]: dict(r) for r in _conn_s.execute("SELECT * FROM recruit_surveys").fetchall()}
         _conn_s.close()
-
-        def _board_survey_line(p_name):
-            # If a target has a completed Recruit Alignment Survey, surface its score and
-            # bucket right on the board - a coach shouldn't have to open a separate tab to
-            # see whether staff are actually aligned on pursuing this player.
-            survey = _survey_rows.get(p_name)
-            if not survey:
-                return ""
-            score = sum(int(survey.get(k) or 0) for k, *_ in SURVEY_CATEGORIES)
-            bucket = survey.get("recruit_bucket") or "-"
-            priority = survey.get("recruiting_priority") or "-"
-            return (
-                "<div style='margin-top:8px;padding-top:8px;border-top:1px solid #eef1f5;"
-                "font-size:10.5px;color:#6b7280;'>"
-                "<span style='font-weight:700;color:#2D68C4;'>&#127919; Alignment Survey:</span> "
-                f"{score}/40 &middot; {bucket} &middot; {priority}"
-                "</div>"
-            )
 
         def _board_stat_row(p_name):
             match = df_all[df_all["PLAYER"] == p_name]
@@ -6452,20 +6496,47 @@ with tab3:
         with st.expander("Print Big Board"):
             components.html(_build_board_print_html(board_groups), height=600, scrolling=True)
 
+        _board_filters_active = bool(_board_q or _board_tier_f or _board_val_f)
         for pos in display_positions:
             group_df = board_groups[pos]
             st.markdown(f"### {pos} ({len(group_df)})")
             if group_df.empty:
-                st.caption("No targets logged at this position yet.")
+                st.caption("No targets match these filters." if _board_filters_active
+                           else "No targets logged at this position yet.")
                 st.divider()
                 continue
 
             ordered_names = group_df["PLAYER"].tolist()
             for i, row in group_df.iterrows():
                 p_name = row["PLAYER"]
-                v_tag = row["VALUE TAG"] if row["VALUE TAG"] else "Properly Valued"
-                v_color = VALUE_TAG_COLORS.get(v_tag, "#64748B")
-                t_color = TIER_BADGE_COLORS.get(row["TIER"], "#94A3B8")
+                # Once a Recruit Alignment Survey exists for this player, the badges switch
+                # from the manually-set Priority/Value Tag to the survey's own verdict - the
+                # survey is a more informed, staff-aligned read, so it should replace the
+                # placeholder rather than just sit in a caption line underneath.
+                _survey = _survey_rows.get(p_name)
+                if _survey:
+                    _survey_score = sum(int(_survey.get(k) or 0) for k, *_ in SURVEY_CATEGORIES)
+                    _survey_priority = _survey.get("recruiting_priority") or "-"
+                    _survey_bucket = _survey.get("recruit_bucket") or "-"
+                    _priority_color = SURVEY_PRIORITY_COLORS.get(_survey_priority, "#64748B")
+                    _badges_html = (
+                        f"<span style='background:{_priority_color}1A;color:{_priority_color};border:1px solid {_priority_color}55;"
+                        f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;margin-right:4px;'>{_survey_score}/40</span>"
+                        f"<span style='background:{_priority_color}1A;color:{_priority_color};border:1px solid {_priority_color}55;"
+                        f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;margin-right:4px;'>{_survey_priority}</span>"
+                        f"<span style='background:#eef3fb;color:#2D68C4;border:1px solid #cfe0f5;"
+                        f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;'>{_survey_bucket}</span>"
+                    )
+                else:
+                    v_tag = row["VALUE TAG"] if row["VALUE TAG"] else "Properly Valued"
+                    v_color = VALUE_TAG_COLORS.get(v_tag, "#64748B")
+                    t_color = TIER_BADGE_COLORS.get(row["TIER"], "#94A3B8")
+                    _badges_html = (
+                        f"<span style='background:{t_color}1A;color:{t_color};border:1px solid {t_color}55;"
+                        f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;margin-right:4px;'>{row['TIER'] or '-'}</span>"
+                        f"<span style='background:{v_color}1A;color:{v_color};border:1px solid {v_color}55;"
+                        f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;'>{v_tag}</span>"
+                    )
 
                 stats_html, tags = _board_stat_row(p_name)
                 tags_html = "".join(
@@ -6514,17 +6585,9 @@ with tab3:
                     c_stats.markdown(f"<div style='padding-top:14px;'>{stats_html}</div>", unsafe_allow_html=True)
                     c_meta.markdown(f"<div style='padding-top:14px;font-weight:600;color:#1B3E76;'>{row['TEAM'] or '-'}</div>", unsafe_allow_html=True)
                     c_badge.markdown(
-                        f"<div style='padding-top:12px;'>"
-                        f"<span style='background:{t_color}1A;color:{t_color};border:1px solid {t_color}55;"
-                    f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;margin-right:4px;'>{row['TIER'] or '-'}</span>"
-                    f"<span style='background:{v_color}1A;color:{v_color};border:1px solid {v_color}55;"
-                    f"padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:700;'>{v_tag}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-                    _survey_line_html = _board_survey_line(p_name)
-                    if _survey_line_html:
-                        st.markdown(_survey_line_html, unsafe_allow_html=True)
+                        f"<div style='padding-top:12px;'>{_badges_html}</div>",
+                        unsafe_allow_html=True,
+                    )
             st.divider()
         conn.close()
 
