@@ -19,6 +19,7 @@ import json
 import requests
 import sqlite3
 import time
+import unicodedata
 import warnings
 from datetime import datetime, timedelta, date as date_type
 
@@ -80,7 +81,47 @@ BART_TO_ESPN_OVERRIDES = {
     "Kansas": "Kansas Jayhawks",
     "Utah": "Utah Utes",
     "North Dakota": "North Dakota Fighting Hawks",
+    # ESPN abbreviates these two further than the usual "St." -> "State" pattern,
+    # or dropped "State" from branding entirely - the general matching logic below
+    # can't infer either, so they need an explicit pointer.
+    "Appalachian St.": "App State",
+    "Sam Houston St.": "Sam Houston Bearkats",
+    # Found by auditing every Bart team name against the real ESPN list - each of
+    # these was silently resolving to the WRONG school via the shortest-name
+    # fallback below (e.g. "Alabama" -> Alabama A&M, "Penn" -> Penn State,
+    # "New Orleans" -> New Mexico), which corrupts game_team_stats for both the
+    # wrongly-matched team AND whichever real team actually owns that ESPN id,
+    # since they silently overwrite each other's rows for the same game date.
+    "Alabama": "Alabama Crimson Tide",
+    "Mississippi": "Ole Miss Rebels",  # Bart uses both "Mississippi" and "Ole Miss" for the same school across games
+    "Illinois Chicago": "UIC Flames",
+    "Cal Baptist": "California Baptist Lancers",
+    "Cal St. Bakersfield": "Cal State Bakersfield Roadrunners",
+    "Cal St. Fullerton": "Cal State Fullerton Titans",
+    "Cal St. Northridge": "Cal State Northridge Matadors",
+    "Louisiana Monroe": "UL Monroe Warhawks",
+    "Loyola MD": "Loyola Maryland Greyhounds",
+    "Nebraska Omaha": "Omaha Mavericks",
+    "New Orleans": "New Orleans Privateers",
+    "Penn": "Pennsylvania Quakers",
+    "Southern": "Southern Jaguars",
+    "Tennessee Martin": "UT Martin Skyhawks",
+    "Texas A&M Corpus Chris": "Texas A&M-Corpus Christi Islanders",
+    "USC Upstate": "South Carolina Upstate Spartans",
+    "Albany": "UAlbany Great Danes",
+    "Connecticut": "UConn Huskies",
+    "FIU": "Florida International Panthers",
+    "Hawaii": "Rainbow Warriors",
+    "UMKC": "Kansas City Roos",
+    "LIU": "Long Island University Sharks",
+    "Southeastern Louisiana": "SE Louisiana Lions",
 }
+
+# Bart teams confirmed to have no current match in ESPN's D1 team list (recent D1
+# transitions ESPN hasn't added yet, as of this check) - skip matching entirely
+# instead of letting the fallback below guess and silently corrupt an unrelated
+# team's box scores.
+BART_NO_ESPN_MATCH = {"Southern Indiana", "Lindenwood", "Queens", "Saint Francis"}
 
 
 # ─────────────────────────── DB INIT / MIGRATE ──────────────────────────────
@@ -291,38 +332,59 @@ def fetch_espn_teams():
     return {t["team"]["id"]: t["team"]["displayName"] for t in teams}
 
 
+def _norm_team_str(s):
+    # Lowercase, strip accents (ESPN spells San Jose State as "San José State" -
+    # a plain .lower() comparison against Bart's plain-ASCII "San Jose St." would
+    # never match), and drop punctuation so "St." vs "St" vs "-" all compare equal.
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return s.lower().replace(".", "").replace("-", " ")
+
+
 def build_name_to_espn_id(bart_rankings, espn_teams):
     """Returns {bart_name: espn_id} mapping."""
     espn_name_to_id = {v: k for k, v in espn_teams.items()}
     result = {}
     for bart_name in bart_rankings:
+        if bart_name in BART_NO_ESPN_MATCH:
+            continue
         espn_id = None
         override = BART_TO_ESPN_OVERRIDES.get(bart_name)
         if override:
             for espn_name, eid in espn_name_to_id.items():
-                if override.lower() in espn_name.lower():
+                if _norm_team_str(override) in _norm_team_str(espn_name):
                     espn_id = eid
                     break
         if espn_id is None and bart_name in espn_name_to_id:
             espn_id = espn_name_to_id[bart_name]
         if espn_id is None:
-            bl = bart_name.lower().replace(".", "").replace("-", " ")
+            bl = _norm_team_str(bart_name)
+            # Bart abbreviates "State" schools as "X St." while ESPN always spells
+            # "State" out in full ("Arizona St." vs "Arizona State Sun Devils") - try
+            # the expanded form FIRST so a real "X State" school is found before the
+            # ambiguous shortest-name fallback below can latch onto an unrelated
+            # same-prefix school ("Arizona St." -> "Arizona Wildcats", "San Jose St."
+            # -> "San Diego Toreros", etc. - both wrong, and both used to happen).
+            _variants = [bl]
+            if bl.endswith(" st"):
+                _variants.insert(0, bl[:-3] + " state")
             # Several schools share a name prefix (Kansas Jayhawks / Kansas City Roos,
             # Utah Utes / Utah State Aggies) - collect every match and prefer the
             # shortest name, since the flagship school is just "<name> <mascot>" while
             # a same-prefix cousin adds a qualifier word (State/City/Tech/Valley/...).
-            candidates = [
-                (eid, espn_name) for espn_name, eid in espn_name_to_id.items()
-                if (espn_name.lower().replace(".", "").replace("-", " ")).startswith(bl + " ")
-                or (espn_name.lower().replace(".", "").replace("-", " ")) == bl
-            ]
-            if candidates:
-                espn_id = min(candidates, key=lambda c: len(c[1]))[0]
+            for _variant in _variants:
+                candidates = [
+                    (eid, espn_name) for espn_name, eid in espn_name_to_id.items()
+                    if _norm_team_str(espn_name).startswith(_variant + " ")
+                    or _norm_team_str(espn_name) == _variant
+                ]
+                if candidates:
+                    espn_id = min(candidates, key=lambda c: len(c[1]))[0]
+                    break
         if espn_id is None:
-            first = bart_name.split()[0].lower().replace(".", "")
+            first = _norm_team_str(bart_name.split()[0])
             candidates = [
                 (eid, espn_name) for espn_name, eid in espn_name_to_id.items()
-                if espn_name.lower().startswith(first)
+                if _norm_team_str(espn_name).startswith(first)
             ]
             if candidates:
                 espn_id = min(candidates, key=lambda c: len(c[1]))[0]
