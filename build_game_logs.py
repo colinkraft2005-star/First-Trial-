@@ -77,6 +77,9 @@ BART_TO_ESPN_OVERRIDES = {
     "Akron": "Akron Zips",
     "Toledo": "Toledo Rockets",
     "Ohio": "Ohio Bobcats",
+    "Kansas": "Kansas Jayhawks",
+    "Utah": "Utah Utes",
+    "North Dakota": "North Dakota Fighting Hawks",
 }
 
 
@@ -304,17 +307,25 @@ def build_name_to_espn_id(bart_rankings, espn_teams):
             espn_id = espn_name_to_id[bart_name]
         if espn_id is None:
             bl = bart_name.lower().replace(".", "").replace("-", " ")
-            for espn_name, eid in espn_name_to_id.items():
-                el = espn_name.lower().replace(".", "").replace("-", " ")
-                if el.startswith(bl + " ") or el == bl:
-                    espn_id = eid
-                    break
+            # Several schools share a name prefix (Kansas Jayhawks / Kansas City Roos,
+            # Utah Utes / Utah State Aggies) - collect every match and prefer the
+            # shortest name, since the flagship school is just "<name> <mascot>" while
+            # a same-prefix cousin adds a qualifier word (State/City/Tech/Valley/...).
+            candidates = [
+                (eid, espn_name) for espn_name, eid in espn_name_to_id.items()
+                if (espn_name.lower().replace(".", "").replace("-", " ")).startswith(bl + " ")
+                or (espn_name.lower().replace(".", "").replace("-", " ")) == bl
+            ]
+            if candidates:
+                espn_id = min(candidates, key=lambda c: len(c[1]))[0]
         if espn_id is None:
             first = bart_name.split()[0].lower().replace(".", "")
-            for espn_name, eid in espn_name_to_id.items():
-                if espn_name.lower().startswith(first):
-                    espn_id = eid
-                    break
+            candidates = [
+                (eid, espn_name) for espn_name, eid in espn_name_to_id.items()
+                if espn_name.lower().startswith(first)
+            ]
+            if candidates:
+                espn_id = min(candidates, key=lambda c: len(c[1]))[0]
         if espn_id:
             result[bart_name] = espn_id
     return result

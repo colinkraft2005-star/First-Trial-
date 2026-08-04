@@ -2,8 +2,11 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# Database files — regenerate locally with build scripts
+# Database files — regenerate locally with build scripts. scouting_hub.db itself is the
+# exception: it's committed directly (well under GitHub's 100MB limit) since the deployed
+# Streamlit Cloud app needs a populated db to avoid calling BartTorvik live on every load.
 *.db
+!scouting_hub.db
 
 # Auth / session files
 synergy_session.json
