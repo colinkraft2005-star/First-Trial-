@@ -4324,10 +4324,10 @@ cards.forEach(function(c, i) {{
 
 
 def render_add_evaluation_form(current_player, key_prefix="card"):
-    """Log a new evaluation for this player. Pulled out from render_player_notes_workspace
-    so it can sit right below the player's name, above Big Board Status - a coach should
-    be able to log their read the moment they land on a player, not after scrolling past
-    everything else.
+    """Log a new evaluation for this player, plus a Position Group selector (auto-saves
+    on change, independent of the note below) - the only remaining manual override for a
+    player's Big Board position group now that Priority/Value Tag have been fully
+    replaced by the Recruit Alignment Survey.
     """
     conn = sqlite3.connect('scouting_hub.db')
     _last_scout_row = conn.execute(
@@ -4341,7 +4341,25 @@ def render_add_evaluation_form(current_player, key_prefix="card"):
             "SELECT scout_name FROM player_notes WHERE player_name = ?", (current_player,)
         ).fetchone()
         _default_scout = _nb_row[0] if _nb_row and _nb_row[0] else ""
+    _pos_row = conn.execute(
+        "SELECT position FROM player_notes WHERE player_name = ?", (current_player,)
+    ).fetchone()
     conn.close()
+
+    _p_match = df_all[df_all["PLAYER"] == current_player]
+    _team_for_save = str(_p_match.iloc[0]["TEAM"]) if not _p_match.empty else ""
+    _saved_pos = (_pos_row[0] if _pos_row and _pos_row[0] else None) or \
+        infer_board_position(_p_match.iloc[0] if not _p_match.empty else None)
+
+    def _save_position_group(_player=current_player, _team=_team_for_save, _sel_key=None):
+        _conn = sqlite3.connect('scouting_hub.db')
+        _conn.execute('''
+                       INSERT INTO player_notes (player_name, team_name, position)
+                       VALUES (?, ?, ?) ON CONFLICT(player_name) DO
+                       UPDATE SET team_name=excluded.team_name, position=excluded.position
+                       ''', (_player, _team, st.session_state.get(_sel_key)))
+        _conn.commit()
+        _conn.close()
 
     st.write("**Add Evaluation**")
     _eval_form_v = st.session_state.setdefault(f"eval_form_v_{current_player}", 0)
@@ -4351,6 +4369,14 @@ def render_add_evaluation_form(current_player, key_prefix="card"):
     )
     _new_eval_date = st.date_input(
         "Date:", value=datetime.now(), key=f"{key_prefix}_new_eval_date_{current_player}_{_eval_form_v}"
+    )
+    _pos_key = f"{key_prefix}_new_eval_pos_{current_player}_{_eval_form_v}"
+    st.selectbox(
+        "Position Group:", BOARD_POSITIONS,
+        index=BOARD_POSITIONS.index(_saved_pos) if _saved_pos in BOARD_POSITIONS else 0,
+        key=_pos_key,
+        on_change=_save_position_group, kwargs={"_sel_key": _pos_key},
+        help="Auto-saves immediately - separate from the evaluation note below.",
     )
     _new_eval_note = st.text_area(
         "Background intel, character evaluation, or general notes:",
@@ -4375,8 +4401,8 @@ def render_add_evaluation_form(current_player, key_prefix="card"):
 
 
 def render_player_notes_workspace(current_player, key_prefix="card"):
-    """Big Board status, representation/personnel info, the Recruit Alignment Survey
-    summary, and the append-only evaluation log - everywhere one coach needs to look to
+    """Representation/personnel info, the Recruit Alignment Survey summary, and the
+    append-only evaluation log - everywhere one coach needs to look to
     see what every other coach thinks of a player, in one place. Shared between the
     bottom of the Player Card and the standalone Player Evaluations tab - both render
     every rerun regardless of which tab is visible, so key_prefix keeps their widget
@@ -4394,88 +4420,10 @@ def render_player_notes_workspace(current_player, key_prefix="card"):
         "SELECT id, scout_name, eval_date, note FROM player_evaluations "
         "WHERE player_name = ? ORDER BY id DESC", (current_player,)
     ).fetchall()
-    _on_board = bool(_nb.get("priority_tier"))
-    _peers = conn.execute(
-        "SELECT player_name, position, board_rank FROM player_notes "
-        "WHERE priority_tier IS NOT NULL AND priority_tier != ''"
-    ).fetchall()
     _survey_row = conn.execute(
         "SELECT * FROM recruit_surveys WHERE player_name = ?", (current_player,)
     ).fetchone()
     conn.close()
-
-    _p_match = df_all[df_all["PLAYER"] == current_player]
-    _team_for_save = str(_p_match.iloc[0]["TEAM"]) if not _p_match.empty else (_nb.get("team_name") or "")
-
-    _saved_pos = _nb.get("position") or infer_board_position(_p_match.iloc[0] if not _p_match.empty else None)
-    _saved_role = _nb.get("role") or ""
-    _saved_tier = _nb.get("priority_tier") or "Mid Priority"
-    _saved_value_tag = _nb.get("value_tag") or "Properly Valued"
-
-    # ---- Big Board Status ----
-    st.markdown("#### Big Board Status")
-    if _on_board:
-        _board_pos = LEGACY_BOARD_POS_MAP.get(_saved_pos, _saved_pos)
-        _group = sorted(
-            (
-                (p["player_name"], p["board_rank"] if p["board_rank"] is not None else 10 ** 9)
-                for p in _peers
-                if LEGACY_BOARD_POS_MAP.get(p["position"], p["position"]) == _board_pos
-            ),
-            key=lambda t: (t[1], t[0]),
-        )
-        _group_names = [p for p, _ in _group]
-        _rank_in_group = (_group_names.index(current_player) + 1) if current_player in _group_names else None
-        _rank_str = f"#{_rank_in_group} of {len(_group_names)}" if _rank_in_group else "unranked"
-        _tier_color = TIER_BADGE_COLORS.get(_saved_tier, "#94A3B8")
-        _vt_color = VALUE_TAG_COLORS.get(_saved_value_tag, "#64748B")
-        st.markdown(
-            "<div style='padding:10px 14px;border-radius:8px;background:#fafbfc;border:1px solid #dde2ee;"
-            f"border-left:4px solid {_tier_color};margin-bottom:10px;'>"
-            f"On the board &middot; <b>{_board_pos}</b> &middot; {_rank_str} &middot; "
-            f"<span style='color:{_tier_color};font-weight:700;'>{_saved_tier}</span> &middot; "
-            f"<span style='color:{_vt_color};font-weight:700;'>{_saved_value_tag}</span>"
-            + (f" &middot; {_saved_role}" if _saved_role else "")
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.caption("Not currently on the Front Office Target Board.")
-
-    with st.expander("Edit Board Status", expanded=not _on_board):
-        col_pos, col_role = st.columns(2)
-        with col_pos:
-            _pos_idx = BOARD_POSITIONS.index(_saved_pos) if _saved_pos in BOARD_POSITIONS else 0
-            position_input = st.selectbox("Position Group:", BOARD_POSITIONS, index=_pos_idx,
-                                          key=f"{key_prefix}_board_pos_{current_player}")
-        with col_role:
-            role_input = st.text_input("Projected Role:", value=_saved_role, key=f"{key_prefix}_board_role_{current_player}")
-        col_tier, col_valtag = st.columns(2)
-        with col_tier:
-            tier_input = st.selectbox(
-                "Priority", TIER_OPTIONS,
-                index=TIER_OPTIONS.index(_saved_tier) if _saved_tier in TIER_OPTIONS else 1,
-                key=f"{key_prefix}_board_tier_{current_player}",
-            )
-        with col_valtag:
-            value_tag_input = st.selectbox(
-                "Value Tag", VALUE_TAG_OPTIONS,
-                index=VALUE_TAG_OPTIONS.index(_saved_value_tag) if _saved_value_tag in VALUE_TAG_OPTIONS else 1,
-                key=f"{key_prefix}_board_valtag_{current_player}",
-            )
-        if st.button("Save Board Status", key=f"{key_prefix}_save_board_{current_player}"):
-            _conn = sqlite3.connect('scouting_hub.db')
-            _conn.execute('''
-                           INSERT INTO player_notes (player_name, team_name, position, role, priority_tier, value_tag)
-                           VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(player_name) DO
-                           UPDATE SET
-                               team_name=excluded.team_name, position=excluded.position, role=excluded.role,
-                               priority_tier=excluded.priority_tier, value_tag=excluded.value_tag
-                           ''', (current_player, _team_for_save, position_input, role_input, tier_input, value_tag_input))
-            _conn.commit()
-            _conn.close()
-            st.success("Board status saved.")
-            st.rerun()
 
     # ---- Notes: alignment survey, representation, evaluation log ----
     st.markdown("#### Notes")
