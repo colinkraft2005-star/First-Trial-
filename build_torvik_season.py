@@ -114,6 +114,11 @@ def main():
         (time.strftime("%Y-%m-%d %H:%M:%S"),),
     )
     conn.commit()
+
+    from build_game_logs import reconcile_player_names
+    print("Reconciling player name spellings against the refreshed season data...")
+    reconcile_player_names(conn)
+
     conn.close()
     print(f"torvik_player_season: {len(df)} rows written.")
 
