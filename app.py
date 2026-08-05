@@ -4914,7 +4914,7 @@ with tab_card:
 
             def _stats_table_row(row_label, r):
                 if r is None:
-                    return f"<tr><td>{row_label}</td>" + "<td>-</td>" * 16 + "</tr>"
+                    return f"<tr><td>{row_label}</td>" + "<td>-</td>" * 12 + "</tr>"
                 return (
                     f"<tr><td style='font-weight:600'>{row_label}</td>"
                     f"<td>{_row_num(r.get('GP'), 0)}</td>"
@@ -4925,14 +4925,10 @@ with tab_card:
                     f"<td>{_row_num(r.get('SPG'))}</td>"
                     f"<td>{_row_num(r.get('BPG'))}</td>"
                     f"<td>{_row_pct(r.get('FG_PCT'))}</td>"
-                    f"<td>{_row_pct(r.get('EFG'))}</td>"
-                    f"<td>{_row_pct(r.get('TS'))}</td>"
                     f"<td>{_row_pct(r.get('TWO_P'))}</td>"
                     f"<td>{_row_pct(r.get('THREE_P'))}</td>"
-                    f"<td>{_row_pct(r.get('USG'))}</td>"
-                    f"<td>{_row_pct(r.get('AST_PCT'))}</td>"
-                    f"<td>{_row_pct(r.get('OR_PCT'))}</td>"
-                    f"<td>{_row_pct(r.get('DR_PCT'))}</td>"
+                    f"<td>{_row_pct(r.get('EFG'))}</td>"
+                    f"<td>{_row_pct(r.get('TS'))}</td>"
                     "</tr>"
                 )
 
@@ -4940,12 +4936,15 @@ with tab_card:
             # we no longer load that split here (combo_tags handles None gracefully).
             _top50_row = None
 
+            # USG%/AST%/OR%/DR% dropped from this table - they're already covered in
+            # the Advanced Stats expander below. Fewer columns at the same table width
+            # means each one gets more room, so bump padding/font-size up a notch too.
             _stats_table_style = (
                 "<style>.card-stats-table{width:100%;border-collapse:separate;border-spacing:0;"
-                "font-size:0.86rem;margin-top:10px;border:1px solid #E2E8F0;border-radius:8px;overflow:hidden;}"
-                ".card-stats-table th{text-align:center;padding:9px 7px;color:#FFFFFF;font-size:0.68rem;"
+                "font-size:0.95rem;margin-top:10px;border:1px solid #E2E8F0;border-radius:8px;overflow:hidden;}"
+                ".card-stats-table th{text-align:center;padding:12px 10px;color:#FFFFFF;font-size:0.74rem;"
                 "font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:#2D68C4;}"
-                ".card-stats-table td{text-align:center;padding:9px 7px;border-bottom:1px solid #F1F5F9;"
+                ".card-stats-table td{text-align:center;padding:12px 10px;border-bottom:1px solid #F1F5F9;"
                 "font-weight:600;color:#1B3E76;}"
                 ".card-stats-table tr:last-child td{border-bottom:none;}"
                 ".card-stats-table tr:nth-child(even) td{background:#F8FAFC;}"
@@ -4953,8 +4952,7 @@ with tab_card:
                 "</style>"
                 "<table class='card-stats-table'><thead><tr>"
                 "<th></th><th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>SPG</th><th>BPG</th>"
-                "<th>FG%</th><th>EFG%</th><th>TS%</th><th>2P%</th><th>3P%</th><th>USG%</th>"
-                "<th>AST%</th><th>OR%</th><th>DR%</th>"
+                "<th>FG%</th><th>2P%</th><th>3P%</th><th>EFG%</th><th>TS%</th>"
                 "</tr></thead><tbody>"
             )
 
