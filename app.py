@@ -1882,7 +1882,7 @@ def build_position_benchmarks(df_all: pd.DataFrame, box_df: pd.DataFrame) -> dic
         pos_df = pd.read_sql_query("SELECT player_name, position_group FROM player_positions", conn)
         conn.close()
     except Exception:
-        return {}
+        pos_df = pd.DataFrame(columns=["player_name", "position_group"])
 
     df_p5 = _p5_filter(df_all)
     if "GP" in df_p5.columns and "MIN_PCT" in df_p5.columns:
@@ -1892,9 +1892,26 @@ def build_position_benchmarks(df_all: pd.DataFrame, box_df: pd.DataFrame) -> dic
     if "GP" in box_p5.columns:
         box_p5 = box_p5[box_p5["GP"] >= COMP_MIN_GP]
 
+    # Position group per player - prefer BartTorvik's own POS_TAG (real data,
+    # covers nearly every P5 rotation player) over the player_positions table
+    # (ESPN-derived, ~30% incomplete for P5 rotation players). Anyone missing
+    # from player_positions used to be silently dropped from EVERY benchmark
+    # pool instead of falling back to a real signal that was sitting right
+    # there. A manual player_positions entry, when one exists, still wins -
+    # that's a deliberate coach override, not a guess.
+    _player_group = {}
+    if not df_p5.empty and "POS_TAG" in df_p5.columns:
+        for _, _row in df_p5[["PLAYER", "POS_TAG"]].iterrows():
+            _bucket = POS_TAG_BUCKET.get(_row["POS_TAG"])
+            if _bucket:
+                _player_group[_row["PLAYER"]] = _bucket
+    if not pos_df.empty:
+        for _name, _grp in zip(pos_df["player_name"], pos_df["position_group"]):
+            _player_group[_name] = _grp
+
     result = {}
     for grp in ("Guard", "Wing", "Big"):
-        names = set(pos_df[pos_df["position_group"] == grp]["player_name"])
+        names = {n for n, g in _player_group.items() if g == grp}
 
         # BartTorvik stats - P5 rotation players in this position group
         d = merge_shot_zones(df_p5[df_p5["PLAYER"].isin(names)].copy())
@@ -4668,7 +4685,12 @@ with tab_card:
         # Position-filtered benchmarks (Guard/Wing/Big)
         _pos_benchmarks = build_position_benchmarks(df_all, _hdr_box)
 
-        # Determine position group for this player
+        # Determine position group for this player. Prefer, in order: a manual
+        # override (player_positions), then BartTorvik's own POS_TAG (real
+        # data - a 7'0" "PF/C" should never get benchmarked as a Guard just
+        # because ESPN's bio endpoint came back empty), then the ESPN bio
+        # position, then height as a last resort - never silently default to
+        # Guard on a Sr this is a real signal available for.
         _player_pos_group = "Guard"  # default
         try:
             _pg_conn = sqlite3.connect("scouting_hub.db")
@@ -4676,8 +4698,11 @@ with tab_card:
                 "SELECT position_group FROM player_positions WHERE player_name = ?", (current_player,)
             ).fetchone()
             _pg_conn.close()
+            _pos_tag_bucket = POS_TAG_BUCKET.get(p_data.get("POS_TAG", "")) if hasattr(p_data, "get") else None
             if _pg_row:
                 _player_pos_group = _pg_row[0]
+            elif _pos_tag_bucket:
+                _player_pos_group = _pos_tag_bucket
             elif _position:
                 # Fall back to ESPN bio position
                 _pos_lower = _position.lower()
@@ -4687,6 +4712,15 @@ with tab_card:
                     _player_pos_group = "Wing"
                 else:
                     _player_pos_group = "Guard"
+            else:
+                _h_in = parse_height_inches(p_data.get("HEIGHT", "")) if hasattr(p_data, "get") else None
+                if _h_in:
+                    if _h_in >= 82:
+                        _player_pos_group = "Big"
+                    elif _h_in >= 78:
+                        _player_pos_group = "Wing"
+                    else:
+                        _player_pos_group = "Guard"
         except Exception:
             pass
 
