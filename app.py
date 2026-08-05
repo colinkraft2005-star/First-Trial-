@@ -2321,6 +2321,33 @@ def build_volume_tags(box_row):
     return tags
 
 
+@st.cache_data(ttl=3600)
+def build_all_player_tags(df_all: pd.DataFrame) -> dict:
+    """{player_name: [every auto-generated skill/volume tag they qualify for]} for the
+    whole player pool - the same tags shown on a Player Card's hero bar, computed once
+    for everyone instead of a coach having to guess which raw stat threshold a tag like
+    "Rim Protector" corresponds to. Used to power the Portal Discovery Engine's tag
+    filter. top_n is set high (not the usual 4 shown on a card) so a player who
+    qualifies for a tag isn't excluded just because it's not one of their top 4."""
+    benchmarks = build_national_benchmarks(df_all)
+    merged = merge_shot_zones(df_all)
+    box_df = load_consistent_boxscore_stats()
+    box_by_player = {}
+    if not box_df.empty:
+        for rec in box_df.to_dict("records"):
+            box_by_player.setdefault(rec.get("PLAYER"), rec)
+
+    result = {}
+    for rec in merged.to_dict("records"):
+        tags = build_auto_skill_tags(rec, benchmarks, top_n=len(AUTO_TAG_STATS), threshold=80.0)
+        for vt in build_volume_tags(box_by_player.get(rec.get("PLAYER"))):
+            if vt not in tags:
+                tags.append(vt)
+        if tags:
+            result[rec.get("PLAYER")] = tags
+    return result
+
+
 def build_combo_tags(stats_row, benchmarks, position_group, box_row=None, top50_row=None,
                       recent_form=None, pos_benchmarks=None):
     """Multi-stat tags that no single percentile column can capture on its own - each one
@@ -6027,19 +6054,11 @@ with tab2:
     st.subheader("Portal Discovery Engine")
     st.caption("Quick filters below cover most searches. Open Advanced Filters only for a specific stat threshold.")
 
-    col_split, col_pos, col_class, col_conf = st.columns(4)
-    with col_split:
-        _disc_split = st.radio(
-            "Competition:", ["All Games", "Top 100", "Top 50"], key="discovery_split",
-        )
-    with col_pos:
-        selected_positions = st.multiselect("Position:", ["Guard", "Wing", "Big"])
-    with col_class:
-        class_options = sorted(list(df_all["CLASS"].dropna().unique()))
-        selected_classes = st.multiselect("Class:", class_options)
-    with col_conf:
-        conf_options = sorted(list(df_all["CONF"].unique()))
-        selected_confs = st.multiselect("Conference:", conf_options)
+    st.write("**Competition:**")
+    _disc_split = st.segmented_control(
+        "Competition:", ["All Games", "Top 100", "Top 50"],
+        default="All Games", key="discovery_split", label_visibility="collapsed",
+    )
 
     _disc_max_rank = 100 if _disc_split == "Top 100" else (50 if _disc_split == "Top 50" else None)
     if _disc_max_rank is not None and _gl_ready:
@@ -6060,22 +6079,35 @@ with tab2:
     else:
         disc_base_df = df_all
 
-    with st.expander("Advanced Filters (team, height, recruit ratings, stat minimums)", expanded=False):
-        col_ht_min, col_ht_max, col_team, col_bucket = st.columns(4)
-        _height_opts = ["Any"] + [f"{h // 12}-{h % 12}" for h in range(64, 91)]
-        with col_ht_min:
-            min_height_pick = st.selectbox("Min Height:", _height_opts)
-        with col_ht_max:
-            max_height_pick = st.selectbox("Max Height:", _height_opts)
+    with st.expander("Advanced Filters (position, team, tags, recruit ratings, stat minimums)", expanded=False):
+        col_pos, col_class, col_conf, col_team = st.columns(4)
+        with col_pos:
+            selected_positions = st.multiselect("Position:", ["Guard", "Wing", "Big"])
+        with col_class:
+            class_options = sorted(list(df_all["CLASS"].dropna().unique()))
+            selected_classes = st.multiselect("Class:", class_options)
+        with col_conf:
+            conf_options = sorted(list(df_all["CONF"].unique()))
+            selected_confs = st.multiselect("Conference:", conf_options)
         with col_team:
             team_options = sorted(list(df_all["TEAM"].unique()))
             selected_teams = st.multiselect("Program / Team:", team_options)
+
+        col_bucket, col_tags = st.columns(2)
         with col_bucket:
             # Recruit Bucket comes from the Recruit Alignment Survey - only players with a
             # saved survey have one, so this filter only ever narrows to tagged players.
             selected_buckets = st.multiselect("Recruit Bucket:", RECRUIT_BUCKETS)
-        min_height_in = parse_height_inches(min_height_pick) if min_height_pick != "Any" else 0
-        max_height_in = parse_height_inches(max_height_pick) if max_height_pick != "Any" else 0
+        with col_tags:
+            # Same auto-generated skill tags shown on a Player Card's hero bar, computed
+            # for the whole pool once - the system already knows who qualifies for each
+            # one, so this is a straight lookup rather than a coach guessing thresholds.
+            _all_player_tags = build_all_player_tags(df_all)
+            _tag_options = sorted({t for tags in _all_player_tags.values() for t in tags})
+            selected_tags = st.multiselect(
+                "Tags:", _tag_options,
+                help="Filters to players who qualify for ANY of the selected tags.",
+            )
 
         selected_survey_labels = {}
         use_survey_filters = st.checkbox("Filter by Recruit Alignment Survey ratings")
@@ -6165,13 +6197,10 @@ with tab2:
     if selected_positions and "POS_TAG" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["POS_TAG"].map(
             lambda t: POS_TAG_BUCKET.get(t, "Wing")).isin(selected_positions)]
-    if (min_height_in or max_height_in) and "HEIGHT" in filtered_df.columns:
-        _height_in_col = filtered_df["HEIGHT"].map(parse_height_inches)
-        if min_height_in:
-            filtered_df = filtered_df[_height_in_col >= min_height_in]
-            _height_in_col = _height_in_col[filtered_df.index]
-        if max_height_in:
-            filtered_df = filtered_df[_height_in_col <= max_height_in]
+    if selected_tags:
+        _wanted_tags = set(selected_tags)
+        filtered_df = filtered_df[filtered_df["PLAYER"].map(
+            lambda p: bool(_wanted_tags & set(_all_player_tags.get(p, []))))]
 
     def _col_filter_range(df, col, rng, floor, ceiling):
         # A slider left at its full width means "no filter" - matches the old
