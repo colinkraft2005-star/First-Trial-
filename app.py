@@ -1892,22 +1892,23 @@ def build_position_benchmarks(df_all: pd.DataFrame, box_df: pd.DataFrame) -> dic
     if "GP" in box_p5.columns:
         box_p5 = box_p5[box_p5["GP"] >= COMP_MIN_GP]
 
-    # Position group per player - prefer BartTorvik's own POS_TAG (real data,
-    # covers nearly every P5 rotation player) over the player_positions table
-    # (ESPN-derived, ~30% incomplete for P5 rotation players). Anyone missing
-    # from player_positions used to be silently dropped from EVERY benchmark
-    # pool instead of falling back to a real signal that was sitting right
-    # there. A manual player_positions entry, when one exists, still wins -
-    # that's a deliberate coach override, not a guess.
+    # Position group per player - prefer BartTorvik's own POS_TAG (real,
+    # granular scouting-style data - covers nearly every P5 rotation player)
+    # over the player_positions table. player_positions is NOT a manual coach
+    # override - it's auto-scraped from ESPN's roster API, which only stores
+    # a coarse G/F/C letter, exactly the kind of generic label that lists a
+    # 6'7" combo forward as "Guard". Anyone missing from player_positions
+    # used to be silently dropped from EVERY benchmark pool instead of
+    # falling back to a real signal that was sitting right there.
     _player_group = {}
+    if not pos_df.empty:
+        for _name, _grp in zip(pos_df["player_name"], pos_df["position_group"]):
+            _player_group[_name] = _grp
     if not df_p5.empty and "POS_TAG" in df_p5.columns:
         for _, _row in df_p5[["PLAYER", "POS_TAG"]].iterrows():
             _bucket = POS_TAG_BUCKET.get(_row["POS_TAG"])
             if _bucket:
                 _player_group[_row["PLAYER"]] = _bucket
-    if not pos_df.empty:
-        for _name, _grp in zip(pos_df["player_name"], pos_df["position_group"]):
-            _player_group[_name] = _grp
 
     result = {}
     for grp in ("Guard", "Wing", "Big"):
@@ -4685,12 +4686,15 @@ with tab_card:
         # Position-filtered benchmarks (Guard/Wing/Big)
         _pos_benchmarks = build_position_benchmarks(df_all, _hdr_box)
 
-        # Determine position group for this player. Prefer, in order: a manual
-        # override (player_positions), then BartTorvik's own POS_TAG (real
-        # data - a 7'0" "PF/C" should never get benchmarked as a Guard just
-        # because ESPN's bio endpoint came back empty), then the ESPN bio
-        # position, then height as a last resort - never silently default to
-        # Guard on a Sr this is a real signal available for.
+        # Determine position group for this player. Prefer, in order:
+        # BartTorvik's own POS_TAG (real, granular scouting-style data - "Wing
+        # F" correctly separates a 6'7" combo forward from an actual guard),
+        # then player_positions (NOT a manual coach override - it's auto-
+        # scraped from ESPN's roster API, which only stores a coarse G/F/C
+        # letter and is exactly the kind of generic label that misclassifies
+        # tweeners as "Guard"), then the ESPN bio position, then height as a
+        # last resort - never silently default to Guard when a real signal
+        # is available.
         _player_pos_group = "Guard"  # default
         try:
             _pg_conn = sqlite3.connect("scouting_hub.db")
@@ -4699,10 +4703,10 @@ with tab_card:
             ).fetchone()
             _pg_conn.close()
             _pos_tag_bucket = POS_TAG_BUCKET.get(p_data.get("POS_TAG", "")) if hasattr(p_data, "get") else None
-            if _pg_row:
-                _player_pos_group = _pg_row[0]
-            elif _pos_tag_bucket:
+            if _pos_tag_bucket:
                 _player_pos_group = _pos_tag_bucket
+            elif _pg_row:
+                _player_pos_group = _pg_row[0]
             elif _position:
                 # Fall back to ESPN bio position
                 _pos_lower = _position.lower()
@@ -4725,6 +4729,10 @@ with tab_card:
             pass
 
         _active_bm = _pos_benchmarks.get(_player_pos_group, {})
+        # Display-only relabel - "Wing" stays the internal bucket key (used to
+        # look up _pos_benchmarks above and everywhere else in the codebase),
+        # but coaches read "Forward" more naturally than "Wing" on the card.
+        _player_pos_label = "Forward" if _player_pos_group == "Wing" else _player_pos_group
         _BOX_LOWER = {"TOV_PCT"}
         _BT_LOWER  = {"TO"}
 
@@ -4861,7 +4869,7 @@ with tab_card:
             if _weight:
                 bio_parts.append(_weight)
             if _player_pos_group:
-                bio_parts.append(_player_pos_group)
+                bio_parts.append(_player_pos_label)
             if _display_class:
                 bio_parts.append(_display_class)
             st.markdown("&nbsp;&nbsp;·&nbsp;&nbsp;".join(bio_parts))
@@ -5078,7 +5086,7 @@ with tab_card:
         except (TypeError, ValueError):
             _hero_ppg_disp = "-"
         _hero_pct_str = (
-            f"{ordinal(_hero_pct)} percentile scorer vs. P5 {_player_pos_group}s"
+            f"{ordinal(_hero_pct)} percentile scorer vs. P5 {_player_pos_label}s"
             if _hero_pct is not None else "Points per game"
         )
         if _hero_tags:
@@ -5268,7 +5276,7 @@ with tab_card:
             ])
 
             with st.expander("Advanced Stats (efficiency, impact, playmaking, shooting, rebounding, defense)"):
-                st.caption(f"Percentiles vs. P5 {_player_pos_group}s")
+                st.caption(f"Percentiles vs. P5 {_player_pos_label}s")
                 col_left, col_right = st.columns(2)
                 with col_left:
                     st.markdown(eff_html + def_html + play_html, unsafe_allow_html=True)
@@ -5372,15 +5380,17 @@ with tab_card:
                 with cc2:
                     comp_bucket = st.radio("Position group for weighting:", comp_bucket_options,
                                            index=comp_bucket_options.index(auto_bucket),
-                                           horizontal=True, key="comp_bucket_radio")
+                                           horizontal=True, key="comp_bucket_radio",
+                                           format_func=lambda v: "Forward" if v == "Wing" else v)
 
                 top_matches, dominant_cat = find_stat_comps(
                     current_player, df_all, card_benchmarks, n=comp_n, bucket_override=comp_bucket
                 )
 
+                _comp_bucket_label = "Forward" if comp_bucket == "Wing" else comp_bucket
                 boost_note = f" boosted toward this player's real-stat strength: **{dominant_cat}**" if dominant_cat else ""
                 st.write(f"**Top {len(top_matches)} comps from {len(df_all):,} current-season players** "
-                         f"- height ±5in, weighted by **{comp_bucket}** profile{boost_note}, "
+                         f"- height ±5in, weighted by **{_comp_bucket_label}** profile{boost_note}, "
                          f"real KenPom team strength nudges the ranking, shot-selection profile and "
                          f"zone FG% (rim/mid/three) also weighted in where shot-chart data exists, and real "
                          f"Synergy play-type mix (spot-up, isolation, post-up, PnR, etc.) weighted in where "
