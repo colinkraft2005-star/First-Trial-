@@ -341,13 +341,18 @@ def _norm_team_str(s):
     return s.lower().replace(".", "").replace("-", " ")
 
 
+_NAME_SUFFIX_RE = re.compile(r"\b(jr|sr|ii|iii|iv|v)\b")
+
+
 def _norm_person_name(s):
     # Same idea as _norm_team_str but stricter (drops spaces/commas too, not
     # just periods/dashes) - player-name variants show up as "AJ" vs "A.J.",
     # "Jason Thirdkill, Jr." vs "Jason Thirdkill Jr.", "Jalen St Clair" vs
-    # "Jalen StClair", accented letters, etc.
+    # "Jalen StClair", accented letters, "A.J. Neal" vs "A.J. Neal Jr." (one
+    # source drops the generational suffix entirely), etc.
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"[^a-z0-9]", "", s.lower())
+    s = _NAME_SUFFIX_RE.sub("", s.lower())
+    return re.sub(r"[^a-z0-9]", "", s)
 
 
 def reconcile_player_names(conn):
