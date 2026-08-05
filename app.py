@@ -5048,12 +5048,57 @@ with tab_card:
                     unsafe_allow_html=True,
                 )
             else:
-                st.markdown(
-                    _stats_table_style
-                    + _stats_table_row("Season", _hdr)
-                    + "</tbody></table>",
-                    unsafe_allow_html=True,
-                )
+                # No CBB Analytics data (that's UCLA-only) - fall back to the same
+                # Season / Conference / Non-Conf / vs Top 100 / vs Top 50 split
+                # already used on the Print Out one-pager, computed from the same
+                # box-score source, for whichever player is loaded. If a player's
+                # own conference can't be resolved (e.g. no game logs at all),
+                # falls back further to just the plain Season row.
+                _card_conf_row = _card_nonconf_row = _card_top100_row = _card_top50_row = None
+                try:
+                    _card_conf_map = build_team_conf_map(df_all)
+                    _card_own_conf = p_data["CONF"]
+                    _card_in_conf_ids = tuple(sorted(
+                        eid for eid, c in _card_conf_map.items() if c == _card_own_conf
+                    ))
+                    if _card_in_conf_ids:
+                        _card_conf_box = load_consistent_boxscore_stats(conf_ids=_card_in_conf_ids)
+                        _ccr = _card_conf_box[_card_conf_box["PLAYER"] == current_player]
+                        _card_conf_row = _ccr.iloc[0] if not _ccr.empty else None
+
+                        _card_nonconf_box = load_consistent_boxscore_stats(
+                            conf_ids=_card_in_conf_ids, exclude_conf_ids=True)
+                        _cncr = _card_nonconf_box[_card_nonconf_box["PLAYER"] == current_player]
+                        _card_nonconf_row = _cncr.iloc[0] if not _cncr.empty else None
+
+                    _card_top100_box = load_consistent_boxscore_stats(max_opp_rank=100)
+                    _c100r = _card_top100_box[_card_top100_box["PLAYER"] == current_player]
+                    _card_top100_row = _c100r.iloc[0] if not _c100r.empty else None
+
+                    _card_top50_box = load_consistent_boxscore_stats(max_opp_rank=50)
+                    _c50r = _card_top50_box[_card_top50_box["PLAYER"] == current_player]
+                    _card_top50_row = _c50r.iloc[0] if not _c50r.empty else None
+                except Exception:
+                    pass
+
+                if _card_conf_row is not None or _card_nonconf_row is not None:
+                    st.markdown(
+                        _stats_table_style
+                        + _stats_table_row("Season", _hdr)
+                        + _stats_table_row("Conference", _card_conf_row)
+                        + _stats_table_row("Non-Conf", _card_nonconf_row)
+                        + _stats_table_row("vs Top 100", _card_top100_row)
+                        + _stats_table_row("vs Top 50", _card_top50_row)
+                        + "</tbody></table>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        _stats_table_style
+                        + _stats_table_row("Season", _hdr)
+                        + "</tbody></table>",
+                        unsafe_allow_html=True,
+                    )
 
         # ── HERO: the one number and the auto-generated strengths a coach sees first,
         # after the main stat line and splits. PPG because it's the one stat every coach
