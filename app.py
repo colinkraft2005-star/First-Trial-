@@ -2741,10 +2741,14 @@ POS_TAG_BUCKET = {
 BOARD_POSITIONS = ["PG", "CG", "Wing", "Four", "Big"]
 
 # International scouting notes use numeric positions (1-5, e.g. "3/4") - map those onto
-# the same 6-bucket Big Board taxonomy so a report can go straight onto the board.
+# the same 6-bucket Big Board taxonomy so a report can go straight onto the board. Newer
+# boards label position by section name instead of a number - map those too so both
+# formats coexist in the same column without breaking "+ Add to Big Board".
 _INTL_POS_TO_BOARD = {
     "1": "PG", "2": "CG", "3": "Wing", "4": "Four", "5": "Big",
     "3/4": "Wing", "4/3": "Four",
+    "ON BALL GUARD": "PG", "COMBO GUARD": "CG", "WING": "Wing",
+    "FOURS": "Four", "BIGS": "Big", "SHOOTING BIGS": "Big",
 }
 
 
@@ -7386,10 +7390,17 @@ with tab_intl:
             _intl_countries = sorted(_intl_df["country"].dropna().unique().tolist())
             _intl_country_filter = st.multiselect("Filter by country:", _intl_countries, default=[])
         with _intl_col_f2:
-            # International prospects are tracked with the classic 1-5 numeric positions
-            # (matching the source scouting board), not the app's PG/CG/Wing/Four/Big
-            # labels - filter on the raw codes directly, same convention as the data itself.
-            _intl_position_filter = st.multiselect("Filter by position:", ["1", "2", "3", "4", "5"], default=[])
+            # Position is a mix of two conventions depending on which board a player came
+            # from: older entries use the classic 1-5 numeric codes, newer ones (26.08.18
+            # board) use section labels (ON BALL GUARD, COMBO GUARD, WING, FOURS, BIGS,
+            # SHOOTING BIGS) - offer whichever values actually appear in the data, in a
+            # sensible position order rather than alphabetical.
+            _intl_pos_order = ["1", "ON BALL GUARD", "2", "COMBO GUARD", "3", "WING",
+                                "4", "FOURS", "5", "BIGS", "SHOOTING BIGS"]
+            _intl_pos_present = {p for v in _intl_df["position"].dropna() for p in str(v).split("/")}
+            _intl_pos_options = [p for p in _intl_pos_order if p in _intl_pos_present] + \
+                sorted(_intl_pos_present - set(_intl_pos_order))
+            _intl_position_filter = st.multiselect("Filter by position:", _intl_pos_options, default=[])
         with _intl_col_f3:
             # Split combo values ("2027/2028") into individual years so the dropdown
             # offers clean single-year options instead of the raw combo strings.
