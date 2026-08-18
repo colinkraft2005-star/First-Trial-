@@ -7392,15 +7392,20 @@ with tab_intl:
         with _intl_col_f2:
             # Position is a mix of two conventions depending on which board a player came
             # from: older entries use the classic 1-5 numeric codes, newer ones (26.08.18
-            # board) use section labels (ON BALL GUARD, COMBO GUARD, WING, FOURS, BIGS,
-            # SHOOTING BIGS) - offer whichever values actually appear in the data, in a
-            # sensible position order rather than alphabetical.
-            _intl_pos_order = ["1", "ON BALL GUARD", "2", "COMBO GUARD", "3", "WING",
-                                "4", "FOUR", "5", "BIG", "SHOOTING BIG"]
+            # board) use section labels (ON BALL GUARD, COMBO GUARD, WING, FOUR, BIG,
+            # SHOOTING BIG). "4" and "FOUR" are the same position under two different
+            # conventions, so group them into one filter option instead of listing both.
+            _intl_pos_groups = [
+                ("1 / On Ball Guard", {"1", "ON BALL GUARD"}),
+                ("2 / Combo Guard", {"2", "COMBO GUARD"}),
+                ("3 / Wing", {"3", "WING"}),
+                ("4 / Four", {"4", "FOUR"}),
+                ("5 / Big", {"5", "BIG"}),
+                ("Shooting Big", {"SHOOTING BIG"}),
+            ]
             _intl_pos_present = {p for v in _intl_df["position"].dropna() for p in str(v).split("/")}
-            _intl_pos_options = [p for p in _intl_pos_order if p in _intl_pos_present] + \
-                sorted(_intl_pos_present - set(_intl_pos_order))
-            _intl_position_filter = st.multiselect("Filter by position:", _intl_pos_options, default=[])
+            _intl_pos_group_map = {label: raws for label, raws in _intl_pos_groups if raws & _intl_pos_present}
+            _intl_position_filter = st.multiselect("Filter by position:", list(_intl_pos_group_map), default=[])
         with _intl_col_f3:
             # Split combo values ("2027/2028") into individual years so the dropdown
             # offers clean single-year options instead of the raw combo strings.
@@ -7450,7 +7455,7 @@ with tab_intl:
         if _intl_country_filter:
             _intl_shown = _intl_shown[_intl_shown["country"].isin(_intl_country_filter)]
         if _intl_position_filter:
-            _intl_wanted_pos = set(_intl_position_filter)
+            _intl_wanted_pos = set().union(*(_intl_pos_group_map[g] for g in _intl_position_filter))
             _intl_shown = _intl_shown[_intl_shown["position"].fillna("").map(
                 lambda p: bool(_intl_wanted_pos & set(str(p).split("/")))
             )]
