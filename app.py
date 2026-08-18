@@ -2748,7 +2748,7 @@ _INTL_POS_TO_BOARD = {
     "1": "PG", "2": "CG", "3": "Wing", "4": "Four", "5": "Big",
     "3/4": "Wing", "4/3": "Four",
     "ON BALL GUARD": "PG", "COMBO GUARD": "CG", "WING": "Wing",
-    "FOURS": "Four", "BIGS": "Big", "SHOOTING BIGS": "Big",
+    "FOUR": "Four", "BIG": "Big", "SHOOTING BIG": "Big",
 }
 
 
@@ -7396,7 +7396,7 @@ with tab_intl:
             # SHOOTING BIGS) - offer whichever values actually appear in the data, in a
             # sensible position order rather than alphabetical.
             _intl_pos_order = ["1", "ON BALL GUARD", "2", "COMBO GUARD", "3", "WING",
-                                "4", "FOURS", "5", "BIGS", "SHOOTING BIGS"]
+                                "4", "FOUR", "5", "BIG", "SHOOTING BIG"]
             _intl_pos_present = {p for v in _intl_df["position"].dropna() for p in str(v).split("/")}
             _intl_pos_options = [p for p in _intl_pos_order if p in _intl_pos_present] + \
                 sorted(_intl_pos_present - set(_intl_pos_order))
