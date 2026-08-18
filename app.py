@@ -7381,13 +7381,23 @@ with tab_intl:
     if _intl_df.empty:
         st.info("No international players logged yet - add one below.")
     else:
-        _intl_col_f1, _intl_col_f2, _intl_col_f3 = st.columns([1, 1, 1.3])
+        _intl_col_f1, _intl_col_f2, _intl_col_f3, _intl_col_f4, _intl_col_f5 = st.columns([1, 1, 1, 1, 1.3])
         with _intl_col_f1:
             _intl_countries = sorted(_intl_df["country"].dropna().unique().tolist())
             _intl_country_filter = st.multiselect("Filter by country:", _intl_countries, default=[])
         with _intl_col_f2:
-            _intl_temp_filter = st.multiselect("Filter by temperature:", _INTL_TEMPS, default=[])
+            # International prospects are tracked with the classic 1-5 numeric positions
+            # (matching the source scouting board), not the app's PG/CG/Wing/Four/Big
+            # labels - filter on the raw codes directly, same convention as the data itself.
+            _intl_position_filter = st.multiselect("Filter by position:", ["1", "2", "3", "4", "5"], default=[])
         with _intl_col_f3:
+            # Split combo values ("2027/2028") into individual years so the dropdown
+            # offers clean single-year options instead of the raw combo strings.
+            _intl_classes = sorted({y for c in _intl_df["class_yr"].dropna() for y in str(c).split("/") if y})
+            _intl_class_filter = st.multiselect("Filter by class:", _intl_classes, default=[])
+        with _intl_col_f4:
+            _intl_temp_filter = st.multiselect("Filter by temperature:", _INTL_TEMPS, default=[])
+        with _intl_col_f5:
             _intl_action_names = sorted(_intl_df["player_name"].tolist())
             _intl_action_pick = st.selectbox(
                 "Search a player (Big Board / Alignment Survey):",
@@ -7428,6 +7438,18 @@ with tab_intl:
         _intl_shown = _intl_df.copy()
         if _intl_country_filter:
             _intl_shown = _intl_shown[_intl_shown["country"].isin(_intl_country_filter)]
+        if _intl_position_filter:
+            _intl_wanted_pos = set(_intl_position_filter)
+            _intl_shown = _intl_shown[_intl_shown["position"].fillna("").map(
+                lambda p: bool(_intl_wanted_pos & set(str(p).split("/")))
+            )]
+        if _intl_class_filter:
+            # Same combo handling as position - a class of "2027/2028" should match a
+            # filter for either 2027 or 2028, not just an exact string match.
+            _intl_wanted_class = set(_intl_class_filter)
+            _intl_shown = _intl_shown[_intl_shown["class_yr"].fillna("").map(
+                lambda c: bool(_intl_wanted_class & set(str(c).split("/")))
+            )]
         if _intl_temp_filter:
             _intl_shown = _intl_shown[_intl_shown["temperature"].isin(_intl_temp_filter)]
 
@@ -7450,11 +7472,20 @@ with tab_intl:
         _intl_display = _intl_shown[[
             "player_name", "country", "height", "position", "age", "class_yr",
             "temperature", "agent", "notes", "profile_url",
-        ]].fillna("").rename(columns={
+        ]].rename(columns={
             "player_name": "Player", "country": "Country", "height": "Height", "position": "POS",
             "age": "Age", "class_yr": "Class", "temperature": "Temperature", "agent": "Agent",
             "notes": "Notes", "profile_url": "Profile",
         })
+        # Format Age as a plain string ourselves (blank for unknown ages) instead of
+        # leaving it numeric - passed through a Styler below, a raw NaN/None renders as
+        # the literal text "None" rather than blanking out automatically.
+        _intl_display["Age"] = pd.to_numeric(_intl_display["Age"], errors="coerce").map(
+            lambda v: f"{v:.1f}" if pd.notna(v) else ""
+        )
+        _intl_text_cols = ["Player", "Country", "Height", "POS", "Class", "Temperature",
+                            "Agent", "Notes", "Profile"]
+        _intl_display[_intl_text_cols] = _intl_display[_intl_text_cols].fillna("")
         _intl_styled = _intl_display.style.apply(_intl_temp_style, subset=["Temperature"])
         st.dataframe(
             _intl_styled,
@@ -7462,7 +7493,6 @@ with tab_intl:
             use_container_width=True,
             height=460,
             column_config={
-                "Age": st.column_config.NumberColumn("Age", format="%.1f"),
                 "Notes": st.column_config.TextColumn("Notes", width="large"),
                 "Profile": st.column_config.LinkColumn("Profile", display_text="Open"),
             },
