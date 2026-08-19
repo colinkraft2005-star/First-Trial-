@@ -7495,9 +7495,12 @@ with tab_intl:
         })
         # Format Age as a plain string ourselves (blank for unknown ages) instead of
         # leaving it numeric - passed through a Styler below, a raw NaN/None renders as
-        # the literal text "None" rather than blanking out automatically.
+        # the literal text "None" rather than blanking out automatically. Some players
+        # only have a birth year on file (no exact age) - that gets stored in this same
+        # column as a 4-digit value, so show it as a plain year ("2008") instead of a
+        # fake decimal age ("2008.0").
         _intl_display["Age"] = pd.to_numeric(_intl_display["Age"], errors="coerce").map(
-            lambda v: f"{v:.1f}" if pd.notna(v) else ""
+            lambda v: (f"{int(v)}" if v >= 1000 else f"{v:.1f}") if pd.notna(v) else ""
         )
         _intl_text_cols = ["Player", "Country", "Height", "POS", "Class", "Temperature",
                             "Agent", "Notes", "Profile"]
@@ -7547,8 +7550,13 @@ with tab_intl:
                 _i_age_default = float(_iv("age", 17.5))
             except (TypeError, ValueError):
                 _i_age_default = 17.5
-            _i_age = st.number_input("Age:", value=_i_age_default, min_value=14.0, max_value=25.0,
-                                      step=0.1, format="%.1f", key=f"intl_age_{_ikey}")
+            # Max widened past 25 - some players only have a birth year on file (no exact
+            # age), stored in this same field as e.g. 2008.0, and the input would raise an
+            # error trying to load a saved value above the old max_value=25 bound.
+            _i_age = st.number_input(
+                "Age (or birth year if exact age isn't known):", value=_i_age_default,
+                min_value=14.0, max_value=2030.0, step=0.1, format="%.1f", key=f"intl_age_{_ikey}",
+            )
         with _ic6:
             _i_class = st.text_input("Class Year:", value=_iv("class_yr"), key=f"intl_class_{_ikey}")
 
